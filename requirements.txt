@@ -1,0 +1,13 @@
+pandas>=2.2
+numpy>=1.26
+scipy>=1.11
+statsmodels>=0.14
+arch>=6.3
+scikit-learn>=1.4
+yfinance>=0.2.40
+requests>=2.31
+pydantic>=2.6
+pandera>=0.20
+tenacity>=8.2
+river>=0.21
+matplotlib>=3.8

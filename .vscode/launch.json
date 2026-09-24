@@ -1,0 +1,53 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Pipeline: ciclo completo (ambas señales)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/run_pipeline.py",
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Pipeline: solo anomalías (intradía)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/run_pipeline.py",
+            "args": ["--signals", "anomaly"],
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Pipeline: solo GARCH (diario)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/run_pipeline.py",
+            "args": ["--signals", "garch"],
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Pipeline: backtest walk-forward (no escribe en la base)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/run_pipeline.py",
+            "args": ["--mode", "backtest"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Pruebas: pytest completo",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["-v"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        }
+    ]
+}

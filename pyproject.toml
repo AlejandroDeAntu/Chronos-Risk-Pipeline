@@ -1,0 +1,41 @@
+[project]
+name = "trading-signals"
+version = "1.0.0"
+description = "Señales automatizadas de anomalías y volatilidad con feedback loop"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 79
+target-version = "py311"
+# El notebook es el EDA original (referencia), no código de producción.
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle (PEP8)
+    "F",        # pyflakes
+    "I",        # orden de imports
+    "N",        # nombres PEP8
+    "UP",       # sintaxis moderna
+    "B",        # bugbear
+    "BLE",      # prohíbe `except Exception` / `except:` genéricos
+    "ANN",      # type hints obligatorios
+    "D",        # docstrings
+    "PD",       # pandas-vet
+    "NPY",      # numpy
+    "SIM",
+]
+ignore = [
+    "D105",  # docstring en métodos mágicos
+    "D107",  # docstring en __init__
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]

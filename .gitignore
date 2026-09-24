@@ -1,0 +1,38 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Credenciales y variables de entorno locales (nunca se suben)
+.env
+.env.*
+!.env.example
+
+# Caches de Python y herramientas
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Artefactos sueltos
+*.zip
+*.log
+*.db-journal
+
+# Reportes de backtest locales (se suben solo los que se citan en el README)
+reports/*
+!reports/.gitkeep
+
+# Editor (se versiona solo la configuración compartida del proyecto)
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# data/pipeline.db NO se ignora: GitHub Actions la versiona como historial
+# auditable de predicciones, resultados y modelos (ver README).
