@@ -1,0 +1,33 @@
+name: CI
+
+# Verificación objetiva de calidad en cada push o pull request: estilo PEP8
+# (79 columnas), type hints, docstrings, excepciones no genéricas (Ruff) y la
+# suite de pytest. Los commits automáticos de datos que hace pipeline.yml con
+# GITHUB_TOKEN no disparan este workflow.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: Lint (Ruff)
+        run: ruff check .
+
+      - name: Formato (Ruff)
+        run: ruff format --check .
+
+      - name: Pruebas (pytest)
+        run: pytest -q

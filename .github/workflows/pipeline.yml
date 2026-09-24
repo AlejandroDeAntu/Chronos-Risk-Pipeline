@@ -1,0 +1,77 @@
+name: Pipeline
+
+# Corre el ciclo completo (predicción -> resultado real -> métricas ->
+# disparador de reentrenamiento) sin intervención humana, sobre todos los
+# activos de src/config.py, usando el punto de entrada único run_pipeline.py.
+#
+# GitHub Actions en vez de cron local o Airflow: es gratuito (2,000 min/mes
+# en repos privados), no depende de que tu PC esté encendida, queda
+# versionado junto al código y envía un correo automático si un job falla.
+
+on:
+  schedule:
+    # Anomalías: cada 15 min, ~horario de mercado US (13-21 UTC), lun-vie.
+    - cron: "*/15 13-21 * * 1-5"
+    # GARCH: una vez al día tras el cierre US, lun-vie.
+    - cron: "0 22 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      signals:
+        description: "Señales a ejecutar"
+        type: choice
+        options: ["anomaly garch", "anomaly", "garch"]
+        default: "anomaly garch"
+
+# Un solo ciclo a la vez: todos escriben en la misma data/pipeline.db.
+concurrency:
+  group: pipeline-db
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Elegir señal según el disparador
+        id: select
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          EVENT: ${{ github.event_name }}
+          MANUAL_SIGNALS: ${{ inputs.signals }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "signals=$MANUAL_SIGNALS" >> "$GITHUB_OUTPUT"
+          elif [ "$SCHEDULE" = "0 22 * * 1-5" ]; then
+            echo "signals=garch" >> "$GITHUB_OUTPUT"
+          else
+            echo "signals=anomaly" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ejecutar pipeline
+        env:
+          PIPELINE_ALERT_WEBHOOK_URL: ${{ secrets.PIPELINE_ALERT_WEBHOOK_URL }}
+          SIGNALS: ${{ steps.select.outputs.signals }}
+        run: python run_pipeline.py --signals $SIGNALS
+
+      # Se ejecuta aunque algún activo haya fallado: lo que sí se procesó
+      # queda registrado, y el job igual aparece en rojo por el paso anterior.
+      - name: Versionar la base de datos actualizada
+        if: ${{ !cancelled() }}
+        run: |
+          git config user.name "trading-pipeline-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/pipeline.db
+          git diff --cached --quiet || git commit -m "data: ciclo ${{ steps.select.outputs.signals }} $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push
