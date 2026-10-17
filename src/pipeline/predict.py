@@ -18,9 +18,9 @@ from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
-from src.config import AssetConfig, PipelineSettings
+from src.config import DAILY_BAR_FINAL_AFTER, AssetConfig, PipelineSettings
 from src.data.fetch import fetch_daily_closes, fetch_intraday_bars
 from src.data.validation import (
     validate_daily_closes,
@@ -46,6 +46,7 @@ from src.schemas import (
 logger = logging.getLogger(__name__)
 
 _COLD_START_METRICS = {"note": "arranque en frío, sin validación previa"}
+_PAYLOAD_LIST = TypeAdapter(list[AnomalyPredictionPayload])
 
 
 def load_intraday_returns(
@@ -73,7 +74,9 @@ def load_intraday_returns(
 
 
 def load_daily_returns(
-    asset: AssetConfig, settings: PipelineSettings
+    asset: AssetConfig,
+    settings: PipelineSettings,
+    now: datetime | None = None,
 ) -> tuple[pd.Series, pd.Series]:
     """Descarga y valida cierres diarios; devuelve ``(close, log_return)``.
 
@@ -86,11 +89,76 @@ def load_daily_returns(
         asset.symbol,
         settings.garch.history_start_date,
         settings.garch.min_history_days,
+        final_after=DAILY_BAR_FINAL_AFTER[asset.asset_class],
+        now=now,
     )
     validate_daily_closes(close.to_frame())
     log_return = compute_log_returns(close)
     validate_log_returns(log_return.to_frame())
     return close, log_return
+
+
+def _backfill_anomaly_predictions(
+    asset: AssetConfig,
+    settings: PipelineSettings,
+    detector: AnomalyDetector,
+    bands: pd.DataFrame,
+    run_ts: datetime,
+) -> int:
+    """Registra las velas cerradas que ninguna corrida previa alcanzó a ver.
+
+    GitHub Actions descarta la mayoría de los cron de 15 min (54 corridas en
+    23 días en vez de ~590), así que predecir solo la última vela deja un
+    ~4% de las barras en la base. Solo se recuperan velas posteriores al
+    entrenamiento del detector: anteriores serían in-sample.
+
+    Parameters
+    ----------
+    asset, settings:
+        Activo y configuración.
+    detector:
+        Detector activo.
+    bands:
+        Salida de ``detector.predict`` sin la última vela.
+    run_ts:
+        Instante UTC de la corrida.
+
+    Returns
+    -------
+    int
+        Filas nuevas insertadas (las ya existentes se ignoran).
+
+    Raises
+    ------
+    DataContractError
+        Si alguna fila no cumple ``AnomalyPredictionPayload``.
+    """
+    out_of_sample = bands[bands.index > pd.Timestamp(detector.trained_at)]
+    if out_of_sample.empty:
+        return 0
+    records = (
+        out_of_sample.rename_axis("observed_at")
+        .reset_index()
+        .assign(
+            asset_symbol=asset.symbol,
+            model_version=detector.version,
+            reversion_horizon_bars=detector.reversion_horizon_bars,
+        )
+        .to_dict("records")
+    )
+    try:
+        payloads = _PAYLOAD_LIST.validate_python(records)
+    except ValidationError as exc:
+        raise DataContractError(
+            f"Backfill de anomalías inválido para '{asset.symbol}': {exc}"
+        ) from exc
+    return database.insert_predictions_bulk(
+        db_path=settings.paths.database_path,
+        signal_type=SignalType.ANOMALY.value,
+        horizon_bars=detector.reversion_horizon_bars,
+        payloads=[p.model_dump(mode="json") for p in payloads],
+        run_ts=run_ts,
+    )
 
 
 def predict_anomaly_for_asset(
@@ -152,7 +220,11 @@ def predict_anomaly_for_asset(
     log_return = load_intraday_returns(
         asset, settings, cfg.predict_period, run_ts
     )
-    latest = detector.predict(log_return, cfg.min_bars_required).iloc[-1]
+    bands = detector.predict(log_return, cfg.min_bars_required)
+    latest = bands.iloc[-1]
+    n_backfilled = _backfill_anomaly_predictions(
+        asset, settings, detector, bands.iloc[:-1], run_ts
+    )
 
     try:
         payload = AnomalyPredictionPayload(
@@ -183,7 +255,8 @@ def predict_anomaly_for_asset(
     )
     detail = (
         f"vela {payload.observed_at:%Y-%m-%d %H:%M} UTC, "
-        f"z={payload.zscore:.2f}, anomalía={payload.is_anomaly}"
+        f"z={payload.zscore:.2f}, anomalía={payload.is_anomaly}, "
+        f"{n_backfilled} velas previas recuperadas"
     )
     if prediction_id is None:
         detail += " (ya registrada, no se duplica)"
@@ -225,7 +298,7 @@ def predict_garch_for_asset(
     """
     cfg = settings.garch
     db_path = settings.paths.database_path
-    close, log_return = load_daily_returns(asset, settings)
+    close, log_return = load_daily_returns(asset, settings, run_ts)
 
     model = registry.load_active_garch_model(db_path, asset.symbol)
     cold_start = model is None

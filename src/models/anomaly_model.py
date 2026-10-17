@@ -197,8 +197,9 @@ def label_reversion_outcomes(
     Returns
     -------
     pandas.DataFrame
-        Copia de ``bands`` con una columna adicional ``reverted`` (``bool``,
-        ``NaN``/fila eliminada si no hay suficientes barras futuras).
+        Copia de ``bands`` con una columna adicional ``reverted`` (``bool``).
+        Se eliminan las filas sin suficientes barras futuras y los empates
+        (retorno actual o futuro acumulado exactamente 0).
 
     Raises
     ------
@@ -218,6 +219,13 @@ def label_reversion_outcomes(
     labeled = bands.copy()
     labeled["future_cum_return"] = future_cum_return
     labeled = labeled.dropna(subset=["future_cum_return"])
+    # Empates: con retorno 0 (o retorno futuro 0) el signo no está definido.
+    # Contarlos como "reversión" inflaba la prevalencia (EUR/USD: 34% de
+    # las barras de 5 min tienen retorno 0) y con ella al baseline aleatorio.
+    is_tie = (labeled["log_return"] == 0.0) | (
+        labeled["future_cum_return"] == 0.0
+    )
+    labeled = labeled[~is_tie]
 
     if labeled.empty:
         raise InsufficientHistoryError(

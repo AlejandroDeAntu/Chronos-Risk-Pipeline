@@ -66,7 +66,7 @@ def run_backtest(
                 errors.append(f"anomaly: {type(exc).__name__}: {exc}")
         if SignalType.GARCH_VOLATILITY_FORECAST in signals:
             try:
-                _, daily_return = load_daily_returns(asset, settings)
+                _, daily_return = load_daily_returns(asset, settings, now)
                 garch = walk_forward_garch(daily_return, settings)
             except TradingPipelineError as exc:
                 errors.append(f"garch: {type(exc).__name__}: {exc}")

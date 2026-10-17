@@ -94,3 +94,25 @@ def test_label_reversion_outcomes_raises_without_future_horizon() -> None:
     )
     with pytest.raises(InsufficientHistoryError):
         label_reversion_outcomes(bands, horizon_bars=10)
+
+
+def test_label_reversion_outcomes_drops_zero_return_ties() -> None:
+    index = pd.date_range("2026-01-01", periods=5, freq="D")
+    bands = pd.DataFrame(
+        {
+            # Barra 1: retorno 0 (empate). Barra 2: futuro acumulado 0.
+            "log_return": [0.01, 0.0, 0.02, 0.01, -0.01],
+            "rolling_mean": [0.0] * 5,
+            "rolling_std": [0.01] * 5,
+            "zscore": [0.0] * 5,
+            "is_anomaly": [False] * 5,
+        },
+        index=index,
+    )
+
+    labeled = label_reversion_outcomes(bands, horizon_bars=2)
+
+    # Antes: ambas barras se etiquetaban como "reversión" por np.sign(0).
+    assert index[1] not in labeled.index
+    assert index[2] not in labeled.index
+    assert index[0] in labeled.index

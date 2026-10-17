@@ -243,3 +243,41 @@ def test_fixed_cadence_forces_garch_retrain(
     metrics = json.loads(latest)
     assert metrics["walk_forward_folds"] >= 1
     assert "baseline_qlike" in metrics["pooled_report"]
+
+
+def test_anomaly_backfills_out_of_sample_bars_missed_by_cron(
+    test_settings: PipelineSettings,
+    test_asset: AssetConfig,
+    synthetic_intraday_close: pd.Series,
+) -> None:
+    _bootstrap(test_settings, SignalType.ANOMALY)
+    db_path = test_settings.paths.database_path
+    detector = registry.load_active_anomaly_model(db_path, test_asset.symbol)
+    assert detector is not None
+    # Detector "entrenado" 1 h antes de la última vela: las 12 velas de
+    # 5 min posteriores son fuera de muestra y ninguna corrida las vio.
+    trained_at = synthetic_intraday_close.index[-1] - pd.Timedelta(hours=1)
+    older = dataclasses.replace(
+        detector, version="v-backfill", trained_at=trained_at.to_pydatetime()
+    )
+    registry.register_candidate(
+        db_path, test_asset.symbol, SignalType.ANOMALY, older, {}
+    )
+    registry.promote_candidate(
+        db_path, test_asset.symbol, SignalType.ANOMALY, "v-backfill"
+    )
+
+    [result] = run_predictions(test_settings, SignalType.ANOMALY, NOW)
+    [again] = run_predictions(test_settings, SignalType.ANOMALY, NOW)
+
+    with sqlite3.connect(db_path) as conn:
+        n_new = conn.execute(
+            "SELECT COUNT(*) FROM predictions WHERE model_version = ?",
+            ("v-backfill",),
+        ).fetchone()[0]
+    # 11 velas recuperadas + la última, que el arranque en frío ya había
+    # registrado con la versión original (UNIQUE por barra).
+    assert result.succeeded, result.detail
+    assert "11 velas previas recuperadas" in result.detail
+    assert n_new == 11
+    assert "0 velas previas recuperadas" in again.detail

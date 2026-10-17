@@ -118,9 +118,13 @@ def _drop_nulls_and_check_duplicates(
 
 
 def fetch_daily_closes(
-    symbol: str, start_date: str, min_rows: int
+    symbol: str,
+    start_date: str,
+    min_rows: int,
+    final_after: pd.Timedelta,
+    now: datetime | None = None,
 ) -> pd.Series:
-    """Descarga cierres diarios y los devuelve como Series validada.
+    """Descarga cierres diarios finalizados y los devuelve validados.
 
     Parameters
     ----------
@@ -130,11 +134,19 @@ def fetch_daily_closes(
         Fecha de inicio ``YYYY-MM-DD``.
     min_rows:
         Mínimo de filas utilizables requerido.
+    final_after:
+        Tiempo, desde la medianoche UTC de la fecha de la vela, a partir del
+        cual su cierre es definitivo. Yahoo publica la vela del día en curso
+        con el último precio (en FX, incluso con fecha de sábado); usarla
+        como origen o como resultado real contamina forecast y evaluación.
+    now:
+        Instante UTC de referencia; por defecto, ahora. Se inyecta en tests.
 
     Returns
     -------
     pandas.Series
-        Cierres diarios sin nulos ni duplicados, en orden cronológico.
+        Cierres diarios sin nulos ni duplicados, en orden cronológico, solo
+        de velas ya finalizadas.
 
     Raises
     ------
@@ -151,6 +163,17 @@ def fetch_daily_closes(
     close = _drop_nulls_and_check_duplicates(
         _extract_close(raw, symbol), symbol
     )
+    reference = pd.Timestamp(now or datetime.now(UTC)).tz_convert(None)
+    bar_date = close.index.tz_localize(None).normalize()
+    is_final = bar_date + final_after <= reference
+    n_open = int((~is_final).sum())
+    if n_open > 0:
+        logger.info(
+            "Se descartaron %d velas diarias no finalizadas de '%s'.",
+            n_open,
+            symbol,
+        )
+    close = close[is_final]
     if len(close) < min_rows:
         raise DataUnavailableError(
             f"'{symbol}' tiene {len(close)} filas, se requieren {min_rows}."

@@ -12,6 +12,7 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
+import pandas as pd
 from pydantic import BaseModel, Field, field_validator
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -22,6 +23,15 @@ class AssetClass(StrEnum):
 
     EQUITY_INDEX = "equity_index"
     FX = "fx"
+
+
+# Desde la medianoche UTC de la fecha de la vela diaria hasta que su cierre
+# es definitivo. Índices US: cierre 20:00/21:00 UTC (EDT/EST) + margen.
+# FX (24/5): conservador, se espera al día UTC siguiente.
+DAILY_BAR_FINAL_AFTER: dict[AssetClass, pd.Timedelta] = {
+    AssetClass.EQUITY_INDEX: pd.Timedelta(hours=21, minutes=15),
+    AssetClass.FX: pd.Timedelta(days=1),
+}
 
 
 class AssetConfig(BaseModel):
@@ -150,6 +160,16 @@ class RetrainTriggerConfig(BaseModel):
         ),
     )
     walk_forward_splits: int = Field(default=4, ge=2)
+    promotion_alpha: float = Field(
+        default=0.05,
+        gt=0.0,
+        lt=0.5,
+        description=(
+            "Significancia (una cola) para promover un candidato: binomial "
+            "de precisión vs prevalencia (anomalías) o Diebold-Mariano vs "
+            "baseline (GARCH)."
+        ),
+    )
     drift_detection_enabled: bool = Field(default=True)
 
 

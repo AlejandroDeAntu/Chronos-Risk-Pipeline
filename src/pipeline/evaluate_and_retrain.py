@@ -345,7 +345,7 @@ def evaluate_garch_for_asset(
             detail="sin modelo activo todavía (se crea al predecir)",
         )
 
-    _, log_return = load_daily_returns(asset, settings)
+    _, log_return = load_daily_returns(asset, settings, now)
     pending = database.fetch_pending_predictions(
         db_path, asset.symbol, signal.value
     )

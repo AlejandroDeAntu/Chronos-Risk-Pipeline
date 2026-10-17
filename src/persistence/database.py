@@ -157,6 +157,50 @@ def insert_prediction(
         return int(cursor.lastrowid) if cursor.rowcount > 0 else None
 
 
+def insert_predictions_bulk(
+    db_path: Path,
+    signal_type: str,
+    horizon_bars: int,
+    payloads: list[dict[str, Any]],
+    run_ts: datetime,
+) -> int:
+    """Inserta varias predicciones en una transacción (idempotente).
+
+    Cada payload debe traer ``asset_symbol``, ``model_version`` y
+    ``observed_at`` (ISO 8601), como los produce
+    ``AnomalyPredictionPayload.model_dump(mode="json")``.
+
+    Returns
+    -------
+    int
+        Filas realmente insertadas (las barras ya registradas se ignoran).
+    """
+    rows = [
+        (
+            run_ts.isoformat(),
+            p["asset_symbol"],
+            signal_type,
+            p["model_version"],
+            datetime.fromisoformat(p["observed_at"]).isoformat(),
+            horizon_bars,
+            json.dumps(p),
+        )
+        for p in payloads
+    ]
+    with _connect(db_path) as conn:
+        before = conn.total_changes
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO predictions
+                (run_ts, asset_symbol, signal_type, model_version,
+                 reference_timestamp, horizon_bars, payload_json, evaluated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            """,
+            rows,
+        )
+        return conn.total_changes - before
+
+
 def fetch_pending_predictions(
     db_path: Path, asset_symbol: str, signal_type: str
 ) -> list[dict[str, Any]]:

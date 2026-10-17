@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import statsmodels.api as sm
 from scipy import stats
 from sklearn.metrics import (
     confusion_matrix,
@@ -253,4 +254,114 @@ def evaluate_volatility_forecast(
             stats.kurtosis(standardized, fisher=True)
         ),
         sample_size_warning=_sample_size_warning(len(predicted)),
+    )
+
+
+@dataclass(frozen=True)
+class PrecisionLiftResult:
+    """Precisión del detector contra la prevalencia de la clase positiva.
+
+    La precisión esperada de un baseline aleatorio, con cualquier tasa de
+    marcado, es exactamente la prevalencia. Comparar contra ella sustituye
+    al F1 de una sola tirada aleatoria, cuya varianza es enorme.
+    """
+
+    precision: float
+    prevalence: float
+    lift: float
+    p_value: float
+    n_predicted_positive: int
+
+
+def precision_lift_test(report: ClassificationReport) -> PrecisionLiftResult:
+    """Test binomial exacto de una cola (H1: precisión > prevalencia).
+
+    Parameters
+    ----------
+    report:
+        Reporte con la matriz de confusión del detector.
+
+    Returns
+    -------
+    PrecisionLiftResult
+        Precisión, prevalencia, lift (precisión / prevalencia) y p-valor.
+
+    Raises
+    ------
+    ValueError
+        Si no hay positivos predichos o la prevalencia es 0 o 1.
+    """
+    (_, _), (fn, tp) = report.confusion_matrix
+    k = report.n_predicted_positive
+    prevalence = (fn + tp) / report.n_samples
+    if k == 0 or not 0.0 < prevalence < 1.0:
+        raise ValueError(
+            f"Test indefinido: k={k}, prevalencia={prevalence:.3f}."
+        )
+    result = stats.binomtest(tp, k, prevalence, alternative="greater")
+    precision = tp / k
+    return PrecisionLiftResult(
+        precision=precision,
+        prevalence=prevalence,
+        lift=precision / prevalence,
+        p_value=float(result.pvalue),
+        n_predicted_positive=k,
+    )
+
+
+@dataclass(frozen=True)
+class DieboldMarianoResult:
+    """Diferencial de pérdida ``d = modelo - referencia`` (< 0 = mejor)."""
+
+    mean_loss_diff: float
+    t_stat: float
+    p_value_one_sided: float
+    n_samples: int
+
+
+def diebold_mariano(
+    model_loss: np.ndarray, reference_loss: np.ndarray
+) -> DieboldMarianoResult:
+    """Test de Diebold-Mariano con error estándar HAC (Newey-West).
+
+    H1 (una cola): la pérdida media del modelo es menor que la de la
+    referencia. Rezago HAC: ``ceil(n^(1/3))``.
+
+    Parameters
+    ----------
+    model_loss:
+        Pérdida punto a punto del modelo (p. ej. QLIKE).
+    reference_loss:
+        Pérdida de la referencia sobre las mismas observaciones.
+
+    Returns
+    -------
+    DieboldMarianoResult
+        Diferencia media, estadístico t y p-valor de una cola.
+
+    Raises
+    ------
+    ValueError
+        Si las longitudes difieren o hay menos de 30 observaciones.
+    """
+    model = np.asarray(model_loss, dtype=float)
+    reference = np.asarray(reference_loss, dtype=float)
+    if len(model) != len(reference):
+        raise ValueError("Las pérdidas deben tener la misma longitud.")
+    if len(model) < _MIN_RELIABLE_SAMPLE:
+        raise ValueError(
+            f"Diebold-Mariano requiere >= {_MIN_RELIABLE_SAMPLE} puntos, "
+            f"se recibieron {len(model)}."
+        )
+    diff = model - reference
+    max_lag = int(np.ceil(len(diff) ** (1.0 / 3.0)))
+    fit = sm.OLS(diff, np.ones_like(diff)).fit(
+        cov_type="HAC", cov_kwds={"maxlags": max_lag}
+    )
+    t_stat = float(fit.tvalues[0])
+    return DieboldMarianoResult(
+        mean_loss_diff=float(diff.mean()),
+        t_stat=t_stat,
+        p_value_one_sided=float(stats.norm.cdf(t_stat)),
+        n_samples=len(diff),
     )

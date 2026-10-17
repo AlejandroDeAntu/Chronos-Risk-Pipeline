@@ -36,8 +36,11 @@ from src.config import AssetConfig, PipelineSettings
 from src.evaluation.metrics import (
     ClassificationReport,
     RegressionReport,
+    diebold_mariano,
     evaluate_anomaly_classifier,
     evaluate_volatility_forecast,
+    precision_lift_test,
+    qlike_loss,
 )
 from src.exceptions import InsufficientHistoryError, ModelFitError
 from src.models.anomaly_model import AnomalyDetector, label_reversion_outcomes
@@ -71,6 +74,8 @@ class GarchWalkForwardResult:
     fold_baseline_qlike: tuple[float, ...]
     pooled: RegressionReport
     standardized_residuals: tuple[float, ...]
+    pointwise_qlike: tuple[float, ...]
+    pointwise_baseline_qlike: tuple[float, ...]
 
 
 @dataclass(frozen=True)
@@ -242,8 +247,9 @@ def walk_forward_garch(
         )
     predicted_all = np.concatenate(predicted_parts)
     realized_all = np.concatenate(realized_parts)
+    baseline_valid = np.concatenate(baseline_parts)
     pooled = evaluate_volatility_forecast(
-        predicted_all, realized_all, np.concatenate(baseline_parts)
+        predicted_all, realized_all, baseline_valid
     )
     return GarchWalkForwardResult(
         n_folds=len(fold_qlike),
@@ -251,6 +257,10 @@ def walk_forward_garch(
         fold_baseline_qlike=tuple(fold_baseline_qlike),
         pooled=pooled,
         standardized_residuals=tuple(realized_all / predicted_all),
+        pointwise_qlike=tuple(qlike_loss(predicted_all, realized_all)),
+        pointwise_baseline_qlike=tuple(
+            qlike_loss(baseline_valid, realized_all)
+        ),
     )
 
 
@@ -278,7 +288,14 @@ def retrain_anomaly_model(
     enough_positives = (
         pooled.n_predicted_positive >= settings.retrain.min_predicted_positives
     )
-    promote = pooled.beats_baseline_f1 and enough_positives
+    # F1 contra UNA tirada aleatoria es casi una moneda al aire cuando el
+    # detector está cerca del azar: se exige significancia sobre el lift.
+    lift = precision_lift_test(pooled) if enough_positives else None
+    promote = (
+        lift is not None
+        and lift.lift > 1.0
+        and lift.p_value < settings.retrain.promotion_alpha
+    )
 
     candidate = AnomalyDetector.fit(
         log_return=log_return,
@@ -290,6 +307,7 @@ def retrain_anomaly_model(
     metrics = {
         "walk_forward_folds": result.n_folds,
         "pooled_report": asdict(pooled),
+        "precision_lift": asdict(lift) if lift is not None else None,
         "promoted": promote,
     }
     registry.register_candidate(
@@ -299,11 +317,12 @@ def retrain_anomaly_model(
         candidate,
         metrics,
     )
-    reason = (
-        f"F1 walk-forward {pooled.f1:.3f} vs baseline "
-        f"{pooled.baseline_f1:.3f}; anomalías predichas "
-        f"{pooled.n_predicted_positive}"
+    lift_text = (
+        f"lift precisión {lift.lift:.3f} (p={lift.p_value:.4f})"
+        if lift is not None
+        else "positivos insuficientes"
     )
+    reason = f"{lift_text}; anomalías {pooled.n_predicted_positive}"
     if promote:
         registry.promote_candidate(
             settings.paths.database_path,
@@ -343,7 +362,11 @@ def retrain_garch_model(
     """
     result = walk_forward_garch(log_return, settings)
     pooled = result.pooled
-    promote = pooled.beats_baseline_qlike
+    dm = diebold_mariano(
+        np.asarray(result.pointwise_qlike),
+        np.asarray(result.pointwise_baseline_qlike),
+    )
+    promote = dm.p_value_one_sided < settings.retrain.promotion_alpha
 
     candidate = GarchVolatilityModel.fit(
         log_return, settings.garch.min_history_days
@@ -351,6 +374,7 @@ def retrain_garch_model(
     metrics = {
         "walk_forward_folds": result.n_folds,
         "pooled_report": asdict(pooled),
+        "diebold_mariano": asdict(dm),
         "promoted": promote,
     }
     registry.register_candidate(
@@ -362,7 +386,8 @@ def retrain_garch_model(
     )
     reason = (
         f"QLIKE walk-forward {pooled.qlike:.4f} vs baseline "
-        f"{pooled.baseline_qlike:.4f}"
+        f"{pooled.baseline_qlike:.4f}; DM t={dm.t_stat:.2f} "
+        f"(p={dm.p_value_one_sided:.4f})"
     )
     if promote:
         registry.promote_candidate(
