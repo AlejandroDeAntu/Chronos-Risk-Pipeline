@@ -86,12 +86,18 @@ def load_intraday_returns(
     return log_return
 
 
-def load_daily_ohlc(
+def load_daily_ohlc_with_repairs(
     asset: AssetConfig,
     settings: PipelineSettings,
     now: datetime | None = None,
-) -> pd.DataFrame:
-    """Descarga, repara (explícitamente) y valida velas diarias OHLC.
+) -> tuple[pd.DataFrame, int]:
+    """Descarga, alinea (FX), repara y valida velas diarias OHLC.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, int]
+        Velas validadas y número de velas que hubo que reparar (se
+        reporta como indicador de calidad de la fuente).
 
     Raises
     ------
@@ -108,10 +114,25 @@ def load_daily_ohlc(
     )
     if asset.asset_class is AssetClass.FX:
         ohlc = align_fx_daily(ohlc)
-    repaired, _ = repair_ohlc(
+    repaired, n_repaired = repair_ohlc(
         ohlc, settings.data_quality.max_ohlc_repair_share
     )
-    return validate_daily_ohlc(repaired)
+    return validate_daily_ohlc(repaired), n_repaired
+
+
+def load_daily_ohlc(
+    asset: AssetConfig,
+    settings: PipelineSettings,
+    now: datetime | None = None,
+) -> pd.DataFrame:
+    """Velas diarias OHLC validadas (ver ``load_daily_ohlc_with_repairs``).
+
+    Raises
+    ------
+    DataUnavailableError, DataContractError
+        Si los datos no existen o no cumplen el contrato.
+    """
+    return load_daily_ohlc_with_repairs(asset, settings, now)[0]
 
 
 def _backfill_anomaly_predictions(

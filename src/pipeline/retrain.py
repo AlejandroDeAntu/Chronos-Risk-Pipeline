@@ -64,6 +64,11 @@ class AnomalyWalkForwardResult:
     fold_f1: tuple[float, ...]
     fold_baseline_f1: tuple[float, ...]
     pooled: ClassificationReport
+    labeled: pd.DataFrame
+    """Velas de prueba de todos los bloques (``zscore``, ``is_anomaly``,
+    ``reverted``, ``seasonal_factor``), para AUC y gráficas."""
+    seasonal_profile: tuple[float, ...]
+    """Perfil horario del detector del último bloque."""
 
 
 @dataclass(frozen=True)
@@ -108,6 +113,8 @@ def walk_forward_anomaly(
     y_base_parts: list[np.ndarray] = []
     fold_f1: list[float] = []
     fold_baseline_f1: list[float] = []
+    labeled_parts: list[pd.DataFrame] = []
+    profile: tuple[float, ...] = ()
 
     for fold, (train_idx, test_idx) in enumerate(splitter.split(log_return)):
         train = log_return.iloc[train_idx]
@@ -145,6 +152,8 @@ def walk_forward_anomaly(
         y_true_parts.append(y_true)
         y_pred_parts.append(y_pred)
         y_base_parts.append(y_base)
+        labeled_parts.append(labeled)
+        profile = detector.seasonal_profile
 
     if not fold_f1:
         raise InsufficientHistoryError(
@@ -160,6 +169,8 @@ def walk_forward_anomaly(
         fold_f1=tuple(fold_f1),
         fold_baseline_f1=tuple(fold_baseline_f1),
         pooled=pooled,
+        labeled=pd.concat(labeled_parts),
+        seasonal_profile=profile,
     )
 
 

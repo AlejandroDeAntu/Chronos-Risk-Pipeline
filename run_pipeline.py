@@ -17,8 +17,10 @@ Uso::
     python run_pipeline.py                      # ciclo completo, ambas señales
     python run_pipeline.py --signals anomaly    # solo anomalías (intradía)
     python run_pipeline.py --signals garch      # solo GARCH (diario)
-    python run_pipeline.py --mode backtest      # walk-forward histórico,
-                                                # no escribe en la base
+    python run_pipeline.py --mode report        # walk-forward histórico +
+                                                # reporte HTML/PDF/PNG en
+                                                # reports/ (no escribe en la
+                                                # base; alias: backtest)
 
 Código de salida: 0 si todas las etapas de todos los activos terminaron
 bien; 1 si alguna falló (los fallos ya se notificaron). Un error de
@@ -33,13 +35,14 @@ import sys
 from datetime import UTC, datetime
 
 from src.config import PipelineSettings, get_settings
-from src.evaluation.backtest import run_backtest, write_backtest_report
+from src.evaluation.backtest import run_backtest
 from src.exceptions import PersistenceError
 from src.notifications.notifier import notify_failure
 from src.persistence import database
 from src.pipeline.evaluate_and_retrain import run_evaluations
 from src.pipeline.predict import run_predictions
 from src.pipeline.results import AssetStageResult, Stage
+from src.reporting.report import write_report
 from src.schemas import SignalType
 
 logger = logging.getLogger("run_pipeline")
@@ -57,10 +60,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["cycle", "backtest"],
+        choices=["cycle", "report", "backtest"],
         default="cycle",
-        help="cycle: producción (por defecto). backtest: walk-forward "
-        "histórico con reporte en reports/, sin escribir en la base.",
+        help="cycle: producción (por defecto). report (alias backtest): "
+        "walk-forward histórico y reporte HTML/PDF/PNG en reports/, sin "
+        "escribir en la base.",
     )
     parser.add_argument(
         "--signals",
@@ -205,10 +209,10 @@ def main(argv: list[str] | None = None) -> int:
         ", ".join(a.symbol for a in settings.assets),
     )
 
-    if args.mode == "backtest":
+    if args.mode in ("report", "backtest"):
         results = run_backtest(settings, signals, now)
-        report_path = write_backtest_report(results, settings, now)
-        logger.info("Reporte de backtest escrito en %s", report_path)
+        paths = write_report(results, settings, now)
+        logger.info("Reporte escrito en %s (HTML y PDF)", paths.directory)
         return 1 if any(item.errors for item in results) else 0
 
     try:

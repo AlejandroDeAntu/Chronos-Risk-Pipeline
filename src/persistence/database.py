@@ -354,6 +354,30 @@ def fetch_recent_evaluation_runs(
     return [dict(row) for row in rows]
 
 
+def fetch_latest_evaluation_runs(db_path: Path) -> list[dict[str, Any]]:
+    """Última corrida de evaluación por activo y señal (monitoreo).
+
+    La agregación se hace en SQL: a Python solo llega una fila por par
+    activo/señal.
+    """
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT e.asset_symbol, e.signal_type, e.model_version,
+                   e.evaluated_at, e.n_outcomes, e.metric_name,
+                   e.model_metric, e.baseline_metric, e.sufficient_data
+            FROM evaluation_runs e
+            JOIN (
+                SELECT asset_symbol, signal_type, MAX(id) AS last_id
+                FROM evaluation_runs
+                GROUP BY asset_symbol, signal_type
+            ) latest ON latest.last_id = e.id
+            ORDER BY e.signal_type, e.asset_symbol
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def insert_model_version(
     db_path: Path,
     asset_symbol: str,

@@ -1,0 +1,40 @@
+name: Reporte semanal
+
+# Genera el reporte de volatilidad y riesgo (HTML autocontenido, PDF y PNG)
+# con datos frescos y lo publica como artifact descargable del run. No se
+# commitea: los reportes son derivados y reproducibles con el mismo comando.
+
+on:
+  schedule:
+    # Lunes 01:00 UTC: velas diarias del viernes ya finalizadas (índices y FX).
+    - cron: "0 1 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Versiones fijadas (uv pip compile, Linux/py3.12) para builds reproducibles.
+      - run: pip install -r requirements.lock
+
+      - name: Generar reporte
+        run: python run_pipeline.py --mode report
+
+      - name: Publicar reporte
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-volatilidad-${{ github.run_number }}
+          path: reports/report_*/
+          retention-days: 90
+          if-no-files-found: error
