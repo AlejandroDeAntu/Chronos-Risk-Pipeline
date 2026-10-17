@@ -1,7 +1,7 @@
 """Registro de modelos: capa tipada sobre la tabla ``model_registry``.
 
 Traduce entre los objetos de dominio (``AnomalyDetector``,
-``GarchVolatilityModel``) y las filas JSON-serializadas de
+modelos de volatilidad) y las filas JSON-serializadas de
 ``src.persistence.database``, para que el resto del pipeline nunca maneje
 JSON crudo directamente.
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 
 from src.exceptions import ModelRegistryError
 from src.models.anomaly_model import AnomalyDetector
-from src.models.garch_model import GarchVolatilityModel
+from src.models.volatility import VolatilityModel, model_from_metadata
 from src.persistence import database
 from src.schemas import SignalType
 
@@ -23,7 +23,7 @@ def register_candidate(
     db_path: Path,
     asset_symbol: str,
     signal_type: SignalType,
-    model: AnomalyDetector | GarchVolatilityModel,
+    model: AnomalyDetector | VolatilityModel,
     validation_metrics: dict[str, float],
 ) -> None:
     """Registra un modelo recién entrenado como ``candidate``.
@@ -41,7 +41,7 @@ def register_candidate(
     signal_type:
         Tipo de señal del modelo.
     model:
-        Instancia de ``AnomalyDetector`` o ``GarchVolatilityModel``.
+        ``AnomalyDetector`` o cualquier familia de volatilidad.
     validation_metrics:
         Métricas de validación walk-forward obtenidas antes de registrar.
     """
@@ -99,22 +99,13 @@ def load_active_anomaly_model(
         ) from exc
 
 
-def load_active_garch_model(
+def load_active_volatility_model(
     db_path: Path, asset_symbol: str
-) -> GarchVolatilityModel | None:
-    """Carga el ``GarchVolatilityModel`` activo de un activo, si existe.
+) -> VolatilityModel | None:
+    """Carga el modelo de volatilidad activo de un activo, si existe.
 
-    Parameters
-    ----------
-    db_path:
-        Ruta a la base de datos SQLite.
-    asset_symbol:
-        Ticker del activo.
-
-    Returns
-    -------
-    GarchVolatilityModel | None
-        El modelo activo, o ``None`` si nunca se ha entrenado uno.
+    La familia se toma de la metadata; los registros previos a la
+    selección de familias se cargan como GARCH(1,1).
 
     Raises
     ------
@@ -127,10 +118,9 @@ def load_active_garch_model(
     if row is None:
         return None
     try:
-        return GarchVolatilityModel.from_metadata(
-            json.loads(row["metadata_json"])
-        )
+        return model_from_metadata(json.loads(row["metadata_json"]))
     except (KeyError, ValueError, TypeError) as exc:
         raise ModelRegistryError(
-            f"Metadata corrupta del GARCH activo de '{asset_symbol}': {exc}"
+            "Metadata corrupta del modelo de volatilidad activo de "
+            f"'{asset_symbol}': {exc}"
         ) from exc

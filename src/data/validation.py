@@ -141,6 +141,40 @@ daily_ohlc_schema = pa.DataFrameSchema(
 )
 
 
+def align_fx_daily(frame: pd.DataFrame) -> pd.DataFrame:
+    """Re-alinea las velas diarias FX de Yahoo al día que describen.
+
+    En las velas diarias FX de Yahoo, ``open`` y ``close`` de la fecha D son
+    casi idénticos (mediana ``|ln(O/C)|`` ~ 6e-5, 2010-2026) y coinciden
+    con el precio al inicio del día D (contrastado con velas de 5 min),
+    mientras que ``high``/``low`` cubren el día D. Sin corregir, el retorno
+    "cierre a cierre" fechado D mide el día D-1 y el rango de D se solapa
+    con el retorno que se quiere pronosticar: fuga de información para
+    cualquier modelo que use el rango.
+
+    Corrección: el cierre del día D es el precio al inicio de D+1 (el
+    ``close`` de la vela siguiente). La última vela se descarta porque su
+    cierre real aún no existe, y ``high``/``low`` se ensanchan para
+    contener al nuevo cierre (la ventana del rango de Yahoo no cubre
+    exactamente las 24 h).
+
+    Parameters
+    ----------
+    frame:
+        Velas FX crudas (``open``, ``high``, ``low``, ``close``).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Copia re-alineada, una fila menos.
+    """
+    aligned = frame.assign(close=frame["close"].shift(-1)).iloc[:-1]
+    return aligned.assign(
+        high=aligned[["high", "open", "close"]].max(axis=1),
+        low=aligned[["low", "open", "close"]].min(axis=1),
+    )
+
+
 def repair_ohlc(
     frame: pd.DataFrame, max_repair_share: float
 ) -> tuple[pd.DataFrame, int]:

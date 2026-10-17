@@ -145,7 +145,7 @@ def test_garch_forecast_is_scored_with_qlike(
     _bootstrap(test_settings, SignalType.GARCH_VOLATILITY_FORECAST)
     returns_pct = compute_log_returns(synthetic_daily_prices) * 100.0
     origin = returns_pct.index[-10]
-    active = registry.load_active_garch_model(
+    active = registry.load_active_volatility_model(
         test_settings.paths.database_path, test_asset.symbol
     )
     assert active is not None
@@ -210,7 +210,7 @@ def test_fixed_cadence_forces_garch_retrain(
     )
     _bootstrap(settings, SignalType.GARCH_VOLATILITY_FORECAST)
     db_path = settings.paths.database_path
-    active = registry.load_active_garch_model(db_path, test_asset.symbol)
+    active = registry.load_active_volatility_model(db_path, test_asset.symbol)
     assert active is not None
     stale = dataclasses.replace(
         active, version="stale", trained_at=NOW - timedelta(days=8)
@@ -241,8 +241,11 @@ def test_fixed_cadence_forces_garch_retrain(
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()[0]
     metrics = json.loads(latest)
-    assert metrics["walk_forward_folds"] >= 1
-    assert "baseline_qlike" in metrics["pooled_report"]
+    # Todas las familias compiten; el campeón parte de la familia activa.
+    assert set(metrics["n_folds"]) == {"garch", "gjr", "egarch", "har"}
+    assert metrics["champion_decision"]["previous"] == "garch"
+    assert {"sd20", "ewma"} <= set(metrics["mean_qlike"])
+    assert "p_value_one_sided" in metrics["diebold_mariano_vs_sd20"]
 
 
 def test_anomaly_backfills_out_of_sample_bars_missed_by_cron(

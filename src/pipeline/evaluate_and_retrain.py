@@ -39,11 +39,15 @@ from src.models.baseline import (
     random_anomaly_baseline,
     trailing_volatility_baseline,
 )
+from src.models.volatility import volatility_frame
 from src.notifications.notifier import notify_failure
 from src.persistence import database, registry
-from src.pipeline.predict import load_daily_returns, load_intraday_returns
+from src.pipeline.predict import load_daily_ohlc, load_intraday_returns
 from src.pipeline.results import AssetStageResult, Stage
-from src.pipeline.retrain import retrain_anomaly_model, retrain_garch_model
+from src.pipeline.retrain import (
+    retrain_anomaly_model,
+    retrain_volatility_model,
+)
 from src.schemas import RetrainDecision, SignalType
 
 logger = logging.getLogger(__name__)
@@ -335,7 +339,7 @@ def evaluate_garch_for_asset(
     """
     db_path = settings.paths.database_path
     signal = SignalType.GARCH_VOLATILITY_FORECAST
-    model = registry.load_active_garch_model(db_path, asset.symbol)
+    model = registry.load_active_volatility_model(db_path, asset.symbol)
     if model is None:
         return AssetStageResult(
             asset_symbol=asset.symbol,
@@ -345,7 +349,8 @@ def evaluate_garch_for_asset(
             detail="sin modelo activo todavía (se crea al predecir)",
         )
 
-    _, log_return = load_daily_returns(asset, settings, now)
+    frame = volatility_frame(load_daily_ohlc(asset, settings, now))
+    log_return = frame["return_pct"] / 100.0
     pending = database.fetch_pending_predictions(
         db_path, asset.symbol, signal.value
     )
@@ -373,7 +378,9 @@ def evaluate_garch_for_asset(
     )
     promoted = None
     if decision.should_retrain:
-        promoted = retrain_garch_model(asset, settings, log_return).promoted
+        promoted = retrain_volatility_model(
+            asset, settings, frame, model.family
+        ).promoted
 
     detail = (
         f"{closed} resultados cerrados, {len(pending) - closed} pendientes; "

@@ -132,3 +132,27 @@ def test_warn_if_stale_is_silent_below_threshold(
         warn_if_stale(close, "^TEST", max_zero_share=0.2)
 
     assert caplog.text == ""
+
+
+def test_align_fx_daily_moves_close_to_end_of_day() -> None:
+    from src.data.validation import align_fx_daily
+
+    # Yahoo FX: open ~= close (precio al inicio del día); el rango cubre el
+    # día. El cierre real del día D es el precio al inicio de D+1.
+    frame = _ohlc(
+        [
+            (1.10, 1.12, 1.09, 1.1001),
+            (1.11, 1.13, 1.105, 1.1102),
+            (1.14, 1.15, 1.13, 1.1401),
+        ]
+    )
+
+    aligned = align_fx_daily(frame)
+
+    # La última vela se descarta: su cierre real aún no existe.
+    assert list(aligned.index) == list(frame.index[:2])
+    assert aligned["close"].tolist() == pytest.approx([1.1102, 1.1401])
+    assert aligned["open"].tolist() == pytest.approx([1.10, 1.11])
+    # El rango se ensancha para contener el nuevo cierre (1.1401 > 1.13).
+    assert aligned.loc[frame.index[1], "high"] == pytest.approx(1.1401)
+    assert validate_daily_ohlc(aligned).equals(aligned)

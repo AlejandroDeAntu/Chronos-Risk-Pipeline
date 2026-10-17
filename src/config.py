@@ -98,7 +98,12 @@ class AnomalyDetectorConfig(BaseModel):
 
 
 class GarchModelConfig(BaseModel):
-    """Hiperparámetros del modelo GARCH(1,1)-t de volatilidad diaria."""
+    """Modelos de volatilidad diaria (la sección conserva su nombre histórico).
+
+    ``candidate_families`` compiten en walk-forward; el campeón de cada
+    activo solo cambia si un retador gana con Diebold-Mariano significativo
+    tras el ajuste de Holm.
+    """
 
     model_config = {"frozen": True}
 
@@ -110,6 +115,13 @@ class GarchModelConfig(BaseModel):
         default=20,
         ge=5,
         description="Ventana del baseline de volatilidad histórica móvil.",
+    )
+    candidate_families: tuple[str, ...] = Field(
+        default=("garch", "gjr", "egarch", "har"), min_length=1
+    )
+    default_family: str = Field(
+        default="garch",
+        description="Familia del arranque en frío, antes de la selección.",
     )
 
 
@@ -179,12 +191,13 @@ class DataQualityConfig(BaseModel):
     model_config = {"frozen": True}
 
     max_ohlc_repair_share: float = Field(
-        default=0.05,
+        default=0.10,
         ge=0.0,
         lt=1.0,
         description=(
             "Proporción máxima de velas OHLC inconsistentes que se reparan "
-            "antes de rechazar la descarga (Yahoo FX: 1-3% observado)."
+            "antes de rechazar la descarga. Yahoo FX 2010-2026: hasta 5.8% "
+            "(USD/JPY); 10% deja margen y detecta una fuente corrupta."
         ),
     )
     max_zero_return_share: float = Field(

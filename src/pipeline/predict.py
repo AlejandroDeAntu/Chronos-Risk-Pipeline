@@ -20,9 +20,15 @@ import numpy as np
 import pandas as pd
 from pydantic import TypeAdapter, ValidationError
 
-from src.config import DAILY_BAR_FINAL_AFTER, AssetConfig, PipelineSettings
+from src.config import (
+    DAILY_BAR_FINAL_AFTER,
+    AssetClass,
+    AssetConfig,
+    PipelineSettings,
+)
 from src.data.fetch import fetch_daily_ohlc, fetch_intraday_bars
 from src.data.validation import (
+    align_fx_daily,
     repair_ohlc,
     validate_daily_ohlc,
     validate_intraday_closes,
@@ -32,10 +38,9 @@ from src.data.validation import (
 from src.exceptions import DataContractError, TradingPipelineError
 from src.features.returns import (
     compute_intraday_log_returns,
-    compute_log_returns,
 )
 from src.models.anomaly_model import AnomalyDetector
-from src.models.garch_model import GarchVolatilityModel
+from src.models.volatility import fit_volatility_model, volatility_frame
 from src.notifications.notifier import notify_failure
 from src.persistence import database, registry
 from src.pipeline.results import AssetStageResult, Stage
@@ -100,28 +105,12 @@ def load_daily_ohlc(
         final_after=DAILY_BAR_FINAL_AFTER[asset.asset_class],
         now=now,
     )
+    if asset.asset_class is AssetClass.FX:
+        ohlc = align_fx_daily(ohlc)
     repaired, _ = repair_ohlc(
         ohlc, settings.data_quality.max_ohlc_repair_share
     )
     return validate_daily_ohlc(repaired)
-
-
-def load_daily_returns(
-    asset: AssetConfig,
-    settings: PipelineSettings,
-    now: datetime | None = None,
-) -> tuple[pd.Series, pd.Series]:
-    """Descarga y valida cierres diarios; devuelve ``(close, log_return)``.
-
-    Raises
-    ------
-    DataUnavailableError, DataContractError, InsufficientHistoryError
-        Si los datos no existen o no cumplen el contrato.
-    """
-    close = load_daily_ohlc(asset, settings, now)["close"]
-    log_return = compute_log_returns(close)
-    validate_log_returns(log_return.to_frame())
-    return close, log_return
 
 
 def _backfill_anomaly_predictions(
@@ -324,16 +313,22 @@ def predict_garch_for_asset(
     """
     cfg = settings.garch
     db_path = settings.paths.database_path
-    close, log_return = load_daily_returns(asset, settings, run_ts)
+    ohlc = load_daily_ohlc(asset, settings, run_ts)
+    close = ohlc["close"]
+    frame = volatility_frame(ohlc)
 
-    model = registry.load_active_garch_model(db_path, asset.symbol)
+    model = registry.load_active_volatility_model(db_path, asset.symbol)
     cold_start = model is None
     if model is None:
         logger.warning(
-            "'%s' sin GARCH activo: ajustando el primero (arranque en frío).",
+            "'%s' sin modelo de volatilidad activo: ajustando %s "
+            "(arranque en frío).",
             asset.symbol,
+            cfg.default_family,
         )
-        model = GarchVolatilityModel.fit(log_return, cfg.min_history_days)
+        model = fit_volatility_model(
+            frame, cfg.default_family, cfg.min_history_days
+        )
         registry.register_candidate(
             db_path,
             asset.symbol,
@@ -348,14 +343,13 @@ def predict_garch_for_asset(
             model.version,
         )
 
-    returns_pct = (log_return * 100.0).to_numpy()
     forecast_origin = close.index[-1].to_pydatetime()
     # zlib.crc32 es determinista entre procesos (hash() de str no lo es).
     seed = zlib.crc32(
         f"{asset.symbol}|{model.version}|{forecast_origin}".encode()
     )
-    sim_returns_pct = model.simulate_paths(
-        returns_pct, cfg.forecast_horizon_days, cfg.n_monte_carlo_paths, seed
+    sim_returns_pct = model.simulate_returns(
+        frame, cfg.forecast_horizon_days, cfg.n_monte_carlo_paths, seed
     )
     sim_log_returns = sim_returns_pct / 100.0
     final_prices = float(close.iloc[-1]) * np.exp(sim_log_returns.sum(axis=1))
@@ -368,8 +362,8 @@ def predict_garch_for_asset(
             model_version=model.version,
             forecast_origin=forecast_origin,
             horizon_days=cfg.forecast_horizon_days,
-            predicted_volatility_pct=model.forecast_next_volatility_pct(
-                returns_pct
+            predicted_volatility_pct=float(
+                np.sqrt(model.forecast_variance(frame, 1)[0])
             ),
             predicted_price_median=float(np.percentile(final_prices, 50.0)),
             predicted_price_p05=float(np.percentile(final_prices, 5.0)),

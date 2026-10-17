@@ -10,9 +10,10 @@ entrenar. Antes:
 2. Para anomalías se usa ``gap = reversion_horizon_bars`` entre
    entrenamiento y prueba (purga): la etiqueta de una barra mira ``H``
    barras hacia adelante, así que ninguna barra de entrenamiento comparte
-   ventana de resultado con la prueba. El GARCH no tiene horizonte de
-   etiqueta (se ajusta por máxima verosimilitud sobre los propios
-   retornos), por lo que no necesita hueco.
+   ventana de resultado con la prueba. Los modelos de volatilidad no
+   tienen horizonte de etiqueta (se ajustan sobre los propios retornos),
+   por lo que no necesitan hueco; su walk-forward vive en
+   ``src/evaluation/volatility_selection.py``.
 3. Las predicciones de todos los bloques se agrupan y se comparan contra el
    baseline sobre exactamente las mismas observaciones.
 
@@ -35,20 +36,20 @@ from sklearn.model_selection import TimeSeriesSplit
 from src.config import AssetConfig, PipelineSettings
 from src.evaluation.metrics import (
     ClassificationReport,
-    RegressionReport,
     diebold_mariano,
     evaluate_anomaly_classifier,
-    evaluate_volatility_forecast,
     precision_lift_test,
-    qlike_loss,
 )
-from src.exceptions import InsufficientHistoryError, ModelFitError
+from src.evaluation.volatility_selection import (
+    select_champion,
+    walk_forward_volatility,
+)
+from src.exceptions import InsufficientHistoryError
 from src.models.anomaly_model import AnomalyDetector, label_reversion_outcomes
 from src.models.baseline import (
     random_anomaly_baseline,
-    trailing_volatility_baseline,
 )
-from src.models.garch_model import GarchVolatilityModel
+from src.models.volatility import fit_volatility_model
 from src.persistence import registry
 from src.schemas import SignalType
 
@@ -63,19 +64,6 @@ class AnomalyWalkForwardResult:
     fold_f1: tuple[float, ...]
     fold_baseline_f1: tuple[float, ...]
     pooled: ClassificationReport
-
-
-@dataclass(frozen=True)
-class GarchWalkForwardResult:
-    """Resultado agregado de la validación walk-forward del GARCH."""
-
-    n_folds: int
-    fold_qlike: tuple[float, ...]
-    fold_baseline_qlike: tuple[float, ...]
-    pooled: RegressionReport
-    standardized_residuals: tuple[float, ...]
-    pointwise_qlike: tuple[float, ...]
-    pointwise_baseline_qlike: tuple[float, ...]
 
 
 @dataclass(frozen=True)
@@ -174,96 +162,6 @@ def walk_forward_anomaly(
     )
 
 
-def walk_forward_garch(
-    log_return: pd.Series, settings: PipelineSettings
-) -> GarchWalkForwardResult:
-    """Valida el GARCH con pronósticos a un paso fuera de muestra.
-
-    En cada bloque los parámetros se estiman solo con el entrenamiento y la
-    varianza se filtra con parámetros fijos: el pronóstico del día ``t`` usa
-    retornos hasta ``t-1``. El baseline es la desviación estándar móvil de
-    los ``baseline_trailing_window`` días previos (``shift(1)``).
-
-    Parameters
-    ----------
-    log_return:
-        Retornos diarios, en orden cronológico.
-    settings:
-        Configuración del pipeline.
-
-    Returns
-    -------
-    GarchWalkForwardResult
-        QLIKE por bloque, reporte agrupado y residuos estandarizados.
-
-    Raises
-    ------
-    InsufficientHistoryError
-        Si ningún bloque pudo evaluarse.
-    """
-    cfg = settings.garch
-    returns_pct = log_return * 100.0
-    baseline_all = trailing_volatility_baseline(
-        returns_pct, cfg.baseline_trailing_window
-    ).to_numpy()
-    values = returns_pct.to_numpy()
-    splitter = TimeSeriesSplit(n_splits=settings.retrain.walk_forward_splits)
-
-    predicted_parts: list[np.ndarray] = []
-    realized_parts: list[np.ndarray] = []
-    baseline_parts: list[np.ndarray] = []
-    fold_qlike: list[float] = []
-    fold_baseline_qlike: list[float] = []
-
-    for fold, (train_idx, test_idx) in enumerate(splitter.split(values)):
-        try:
-            model = GarchVolatilityModel.fit(
-                log_return.iloc[train_idx],
-                cfg.min_history_days,
-                version=f"walk_forward_fold_{fold}",
-            )
-        except (InsufficientHistoryError, ModelFitError) as exc:
-            logger.info("Bloque %d omitido: %s", fold, exc)
-            continue
-
-        variance = model.conditional_variance_path(values[: test_idx[-1] + 1])
-        predicted = np.sqrt(variance[test_idx])
-        realized = values[test_idx]
-        baseline = baseline_all[test_idx]
-        valid = np.isfinite(baseline) & (baseline > 0.0)
-
-        report = evaluate_volatility_forecast(
-            predicted[valid], realized[valid], baseline[valid]
-        )
-        fold_qlike.append(report.qlike)
-        fold_baseline_qlike.append(report.baseline_qlike)
-        predicted_parts.append(predicted[valid])
-        realized_parts.append(realized[valid])
-        baseline_parts.append(baseline[valid])
-
-    if not fold_qlike:
-        raise InsufficientHistoryError(
-            "Ningún bloque walk-forward del GARCH tuvo datos suficientes."
-        )
-    predicted_all = np.concatenate(predicted_parts)
-    realized_all = np.concatenate(realized_parts)
-    baseline_valid = np.concatenate(baseline_parts)
-    pooled = evaluate_volatility_forecast(
-        predicted_all, realized_all, baseline_valid
-    )
-    return GarchWalkForwardResult(
-        n_folds=len(fold_qlike),
-        fold_qlike=tuple(fold_qlike),
-        fold_baseline_qlike=tuple(fold_baseline_qlike),
-        pooled=pooled,
-        standardized_residuals=tuple(realized_all / predicted_all),
-        pointwise_qlike=tuple(qlike_loss(predicted_all, realized_all)),
-        pointwise_baseline_qlike=tuple(
-            qlike_loss(baseline_valid, realized_all)
-        ),
-    )
-
-
 def retrain_anomaly_model(
     asset: AssetConfig, settings: PipelineSettings, log_return: pd.Series
 ) -> RetrainOutcome:
@@ -341,10 +239,20 @@ def retrain_anomaly_model(
     return RetrainOutcome(candidate.version, promote, reason, metrics)
 
 
-def retrain_garch_model(
-    asset: AssetConfig, settings: PipelineSettings, log_return: pd.Series
+def retrain_volatility_model(
+    asset: AssetConfig,
+    settings: PipelineSettings,
+    frame: pd.DataFrame,
+    current_family: str,
 ) -> RetrainOutcome:
-    """Valida, reentrena y promueve (si corresponde) el GARCH de un activo.
+    """Selecciona la familia campeona, reentrena y promueve si corresponde.
+
+    1. Walk-forward de todas las familias candidatas en los mismos días.
+    2. Champion-challenger: el campeón vigente solo cambia si un retador le
+       gana con Diebold-Mariano significativo tras el ajuste de Holm.
+    3. Piso de calidad: el campeón debe superar al baseline SD-20d con
+       Diebold-Mariano (``promotion_alpha``); si no, se registra como
+       candidato y el modelo activo sigue sirviendo.
 
     Parameters
     ----------
@@ -352,29 +260,41 @@ def retrain_garch_model(
         Activo a reentrenar.
     settings:
         Configuración del pipeline.
-    log_return:
-        Retornos diarios disponibles.
+    frame:
+        Salida de ``volatility_frame`` con todo el historial disponible.
+    current_family:
+        Familia del modelo activo.
 
     Returns
     -------
     RetrainOutcome
         Versión candidata, si se promovió y por qué.
     """
-    result = walk_forward_garch(log_return, settings)
-    pooled = result.pooled
-    dm = diebold_mariano(
-        np.asarray(result.pointwise_qlike),
-        np.asarray(result.pointwise_baseline_qlike),
+    alpha = settings.retrain.promotion_alpha
+    walk_forward = walk_forward_volatility(
+        frame, settings, settings.garch.candidate_families
     )
-    promote = dm.p_value_one_sided < settings.retrain.promotion_alpha
+    decision = select_champion(walk_forward, current_family, alpha)
+    champion_loss = walk_forward.qlike(decision.champion)
+    baseline_loss = walk_forward.qlike("sd20")
+    common = walk_forward.common_mask
+    dm = diebold_mariano(champion_loss[common], baseline_loss[common])
+    promote = dm.p_value_one_sided < alpha
 
-    candidate = GarchVolatilityModel.fit(
-        log_return, settings.garch.min_history_days
+    candidate = fit_volatility_model(
+        frame, decision.champion, settings.garch.min_history_days
     )
     metrics = {
-        "walk_forward_folds": result.n_folds,
-        "pooled_report": asdict(pooled),
-        "diebold_mariano": asdict(dm),
+        "champion_decision": asdict(decision),
+        "mean_qlike": {
+            name: walk_forward.mean_qlike(name)
+            for name in (*walk_forward.forecasts, "sd20", "ewma")
+        },
+        "n_folds": walk_forward.n_folds,
+        "failed_families": walk_forward.failed,
+        "n_test_days": len(walk_forward.dates),
+        "n_common_days": int(walk_forward.common_mask.sum()),
+        "diebold_mariano_vs_sd20": asdict(dm),
         "promoted": promote,
     }
     registry.register_candidate(
@@ -385,9 +305,8 @@ def retrain_garch_model(
         metrics,
     )
     reason = (
-        f"QLIKE walk-forward {pooled.qlike:.4f} vs baseline "
-        f"{pooled.baseline_qlike:.4f}; DM t={dm.t_stat:.2f} "
-        f"(p={dm.p_value_one_sided:.4f})"
+        f"{decision.reason} Campeón '{decision.champion}' vs SD-20d: DM "
+        f"t={dm.t_stat:.2f} (p={dm.p_value_one_sided:.4f})"
     )
     if promote:
         registry.promote_candidate(
@@ -396,11 +315,11 @@ def retrain_garch_model(
             SignalType.GARCH_VOLATILITY_FORECAST,
             candidate.version,
         )
-        logger.info("GARCH de '%s' promovido: %s.", asset.symbol, reason)
+        logger.info("Volatilidad de '%s' promovida: %s.", asset.symbol, reason)
     else:
         logger.warning(
-            "GARCH candidato de '%s' NO promovido (%s); se mantiene el "
-            "modelo activo.",
+            "Modelo de volatilidad candidato de '%s' NO promovido (%s); se "
+            "mantiene el activo.",
             asset.symbol,
             reason,
         )
