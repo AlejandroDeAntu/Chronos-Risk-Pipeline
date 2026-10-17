@@ -39,6 +39,7 @@ from src.models.volatility import fit_volatility_model
 logger = logging.getLogger(__name__)
 
 BASELINES: tuple[str, ...] = ("sd20", "ewma")
+VAR_LEVELS: tuple[float, ...] = (0.01, 0.05)
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,10 @@ class VolatilityWalkForward:
     forecasts:
         Volatilidad pronosticada (%) por familia; ``NaN`` en bloques donde
         el ajuste falló.
+    var_z:
+        Por familia, cuantiles ``VAR_LEVELS`` de los residuos estandarizados
+        del bloque de entrenamiento que produjo cada pronóstico, forma
+        ``(n, len(VAR_LEVELS))``. VaR filtrado: ``VaR_t = z_q sigma_t``.
     n_folds:
         Bloques ajustados con éxito por familia.
     failed:
@@ -69,6 +74,7 @@ class VolatilityWalkForward:
     rv_proxy_pct2: np.ndarray
     baselines: dict[str, np.ndarray]
     forecasts: dict[str, np.ndarray]
+    var_z: dict[str, np.ndarray]
     n_folds: dict[str, int]
     failed: dict[str, str]
 
@@ -85,6 +91,22 @@ class VolatilityWalkForward:
         valid = np.isfinite(sigma) & (sigma > 0.0)
         loss[valid] = qlike_loss(sigma[valid], self.realized_pct[valid])
         return loss
+
+    def value_at_risk(self, family: str, level: float) -> np.ndarray:
+        """VaR filtrado del día (cuantil de retorno en %, negativo).
+
+        Usa el cuantil empírico de los residuos estandarizados de
+        entrenamiento en lugar de suponer normalidad o una t.
+
+        Raises
+        ------
+        ValueError
+            Si ``level`` no está en ``VAR_LEVELS``.
+        """
+        if level not in VAR_LEVELS:
+            raise ValueError(f"level debe ser uno de {VAR_LEVELS}.")
+        column = VAR_LEVELS.index(level)
+        return self.var_z[family][:, column] * self.forecasts[family]
 
     @property
     def common_mask(self) -> np.ndarray:
@@ -166,6 +188,10 @@ def walk_forward_volatility(
     forecasts = {
         family: np.full(len(test_rows), np.nan) for family in families
     }
+    var_z = {
+        family: np.full((len(test_rows), len(VAR_LEVELS)), np.nan)
+        for family in families
+    }
     n_folds = dict.fromkeys(families, 0)
     errors: dict[str, str] = {}
     rv_proxy = np.full(len(test_rows), np.nan)
@@ -188,6 +214,10 @@ def walk_forward_volatility(
                 continue
             variance = model.variance_path(history).to_numpy()[test]
             forecasts[family][slots] = np.sqrt(variance)
+            var_z[family][slots] = _training_z_quantiles(
+                model.variance_path(frame.iloc[train]),
+                frame["return_pct"].iloc[train],
+            )
             n_folds[family] += 1
 
     baselines = {
@@ -207,9 +237,18 @@ def walk_forward_volatility(
         forecasts={
             f: v[keep] for f, v in forecasts.items() if f not in failed
         },
+        var_z={f: v[keep] for f, v in var_z.items() if f not in failed},
         n_folds={f: n for f, n in n_folds.items() if f not in failed},
         failed=failed,
     )
+
+
+def _training_z_quantiles(
+    variance: pd.Series, returns_pct: pd.Series
+) -> np.ndarray:
+    """Cuantiles ``VAR_LEVELS`` de ``r / sigma`` en entrenamiento."""
+    standardized = (returns_pct / np.sqrt(variance)).to_numpy()
+    return np.quantile(standardized[np.isfinite(standardized)], VAR_LEVELS)
 
 
 def _scaled_rv(

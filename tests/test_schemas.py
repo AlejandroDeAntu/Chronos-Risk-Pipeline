@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.schemas import AnomalyPredictionPayload, GarchForecastPayload
+from src.schemas import AnomalyPredictionPayload
 
 
 def test_anomaly_payload_accepts_valid_data() -> None:
@@ -67,36 +67,4 @@ def test_anomaly_payload_rejects_empty_symbol() -> None:
             zscore=0.0,
             is_anomaly=False,
             reversion_horizon_bars=10,
-        )
-
-
-def test_garch_payload_rejects_p95_below_p05() -> None:
-    with pytest.raises(ValidationError):
-        GarchForecastPayload(
-            asset_symbol="SPY",
-            model_version="v1",
-            forecast_origin=datetime.now(UTC),
-            horizon_days=5,
-            predicted_volatility_pct=1.2,
-            predicted_price_median=100.0,
-            predicted_price_p05=110.0,
-            predicted_price_p95=90.0,
-            var_95=-0.02,
-            cvar_95=-0.03,
-        )
-
-
-def test_garch_payload_rejects_non_positive_price() -> None:
-    with pytest.raises(ValidationError):
-        GarchForecastPayload(
-            asset_symbol="SPY",
-            model_version="v1",
-            forecast_origin=datetime.now(UTC),
-            horizon_days=5,
-            predicted_volatility_pct=1.2,
-            predicted_price_median=0.0,
-            predicted_price_p05=90.0,
-            predicted_price_p95=110.0,
-            var_95=-0.02,
-            cvar_95=-0.03,
         )

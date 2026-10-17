@@ -80,6 +80,7 @@ def test_challenger_replaces_clearly_worse_champion() -> None:
             "garch": np.full(n, 1.2),  # ignora la volatilidad cambiante
             "har": sigma,  # pronóstico perfecto
         },
+        var_z={"garch": np.zeros((n, 2)), "har": np.zeros((n, 2))},
         n_folds={"garch": 4, "har": 4},
         failed={},
     )
@@ -113,6 +114,7 @@ def test_comparisons_use_the_common_sample() -> None:
         rv_proxy_pct2=np.ones(n),
         baselines={"sd20": np.ones(n), "ewma": np.ones(n)},
         forecasts={"garch": full, "egarch": partial},
+        var_z={"garch": np.zeros((n, 2)), "egarch": np.zeros((n, 2))},
         n_folds={"garch": 2, "egarch": 1},
         failed={},
     )

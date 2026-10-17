@@ -40,14 +40,15 @@ from src.features.returns import (
     compute_intraday_log_returns,
 )
 from src.models.anomaly_model import AnomalyDetector
+from src.models.scenarios import price_quantiles, tail_risk
 from src.models.volatility import fit_volatility_model, volatility_frame
 from src.notifications.notifier import notify_failure
 from src.persistence import database, registry
 from src.pipeline.results import AssetStageResult, Stage
 from src.schemas import (
     AnomalyPredictionPayload,
-    GarchForecastPayload,
     SignalType,
+    VolatilityForecastPayload,
 )
 
 logger = logging.getLogger(__name__)
@@ -348,32 +349,33 @@ def predict_garch_for_asset(
     seed = zlib.crc32(
         f"{asset.symbol}|{model.version}|{forecast_origin}".encode()
     )
-    sim_returns_pct = model.simulate_returns(
-        frame, cfg.forecast_horizon_days, cfg.n_monte_carlo_paths, seed
-    )
-    sim_log_returns = sim_returns_pct / 100.0
-    final_prices = float(close.iloc[-1]) * np.exp(sim_log_returns.sum(axis=1))
-    day1 = sim_log_returns[:, 0]
-    var_95 = float(np.percentile(day1, 5.0))
+    last_close = float(close.iloc[-1])
+    horizon, n_paths = cfg.forecast_horizon_days, cfg.n_monte_carlo_paths
+    monte_carlo = model.simulate_returns(frame, horizon, n_paths, seed)
+    fhs = model.simulate_returns(frame, horizon, n_paths, seed, method="fhs")
+    var_95, cvar_95 = tail_risk(monte_carlo, 0.05)
+    var_99, cvar_99 = tail_risk(monte_carlo, 0.01)
 
     try:
-        payload = GarchForecastPayload(
+        payload = VolatilityForecastPayload(
             asset_symbol=asset.symbol,
             model_version=model.version,
+            model_family=model.family,
             forecast_origin=forecast_origin,
-            horizon_days=cfg.forecast_horizon_days,
+            horizon_days=horizon,
             predicted_volatility_pct=float(
                 np.sqrt(model.forecast_variance(frame, 1)[0])
             ),
-            predicted_price_median=float(np.percentile(final_prices, 50.0)),
-            predicted_price_p05=float(np.percentile(final_prices, 5.0)),
-            predicted_price_p95=float(np.percentile(final_prices, 95.0)),
             var_95=var_95,
-            cvar_95=float(day1[day1 <= var_95].mean()),
+            cvar_95=cvar_95,
+            var_99=var_99,
+            cvar_99=cvar_99,
+            scenarios_monte_carlo=price_quantiles(last_close, monte_carlo),
+            scenarios_fhs=price_quantiles(last_close, fhs),
         )
     except ValidationError as exc:
         raise DataContractError(
-            f"Forecast GARCH inválido para '{asset.symbol}': {exc}"
+            f"Pronóstico de volatilidad inválido para '{asset.symbol}': {exc}"
         ) from exc
 
     prediction_id = database.insert_prediction(
@@ -387,9 +389,9 @@ def predict_garch_for_asset(
         run_ts=run_ts,
     )
     detail = (
-        f"origen {forecast_origin:%Y-%m-%d}, "
+        f"{model.family} origen {forecast_origin:%Y-%m-%d}, "
         f"vol 1d={payload.predicted_volatility_pct:.3f}%, "
-        f"VaR95={payload.var_95:.4f}"
+        f"VaR95={payload.var_95:.4f}, VaR99={payload.var_99:.4f}"
     )
     if prediction_id is None:
         detail += " (ya registrado, no se duplica)"

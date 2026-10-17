@@ -12,7 +12,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SignalType(StrEnum):
@@ -43,27 +43,62 @@ class AnomalyPredictionPayload(BaseModel):
         return value
 
 
-class GarchForecastPayload(BaseModel):
-    """Contrato de un forecast de volatilidad GARCH."""
+class PriceQuantiles(BaseModel):
+    """Percentiles del precio al cierre de un día del horizonte."""
 
+    day: int = Field(ge=1)
+    p05: float = Field(gt=0.0)
+    p25: float = Field(gt=0.0)
+    p50: float = Field(gt=0.0)
+    p75: float = Field(gt=0.0)
+    p95: float = Field(gt=0.0)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> PriceQuantiles:
+        levels = [self.p05, self.p25, self.p50, self.p75, self.p95]
+        if levels != sorted(levels):
+            raise ValueError(f"Los percentiles deben ir ordenados: {levels}.")
+        return self
+
+
+class VolatilityForecastPayload(BaseModel):
+    """Contrato de un pronóstico de volatilidad con escenarios (v2).
+
+    ``var_*`` y ``cvar_*`` son cuantiles del log-retorno del día 1 (en
+    proporción, negativos para pérdidas) bajo el Monte Carlo del modelo.
+    Los escenarios de precio se guardan por día del horizonte con dos
+    métodos: Monte Carlo paramétrico y simulación histórica filtrada.
+    """
+
+    schema_version: Literal[2] = 2
     asset_symbol: str = Field(min_length=1)
     model_version: str = Field(min_length=1)
+    model_family: str = Field(min_length=1)
     forecast_origin: datetime
     horizon_days: int = Field(ge=1)
     predicted_volatility_pct: float = Field(gt=0.0)
-    predicted_price_median: float = Field(gt=0.0)
-    predicted_price_p05: float = Field(gt=0.0)
-    predicted_price_p95: float = Field(gt=0.0)
     var_95: float
     cvar_95: float
+    var_99: float
+    cvar_99: float
+    scenarios_monte_carlo: list[PriceQuantiles]
+    scenarios_fhs: list[PriceQuantiles]
 
-    @field_validator("predicted_price_p95")
-    @classmethod
-    def _p95_gte_p05(cls, value: float, info: ValidationInfo) -> float:
-        p05 = info.data.get("predicted_price_p05")
-        if p05 is not None and value < p05:
-            raise ValueError("El percentil 95 no puede ser menor que el 5.")
-        return value
+    @model_validator(mode="after")
+    def _consistent(self) -> VolatilityForecastPayload:
+        for name in ("scenarios_monte_carlo", "scenarios_fhs"):
+            if len(getattr(self, name)) != self.horizon_days:
+                raise ValueError(
+                    f"{name} debe tener una fila por día del horizonte "
+                    f"({self.horizon_days})."
+                )
+        if self.cvar_95 > self.var_95 or self.cvar_99 > self.var_99:
+            raise ValueError("El CVaR no puede ser menos severo que el VaR.")
+        if self.var_99 > self.var_95:
+            raise ValueError(
+                "El VaR 99% no puede ser menos severo que el 95%."
+            )
+        return self
 
 
 RetrainTrigger = Literal[
