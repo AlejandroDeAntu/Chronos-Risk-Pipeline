@@ -21,11 +21,13 @@ import pandas as pd
 from pydantic import TypeAdapter, ValidationError
 
 from src.config import DAILY_BAR_FINAL_AFTER, AssetConfig, PipelineSettings
-from src.data.fetch import fetch_daily_closes, fetch_intraday_bars
+from src.data.fetch import fetch_daily_ohlc, fetch_intraday_bars
 from src.data.validation import (
-    validate_daily_closes,
+    repair_ohlc,
+    validate_daily_ohlc,
     validate_intraday_closes,
     validate_log_returns,
+    warn_if_stale,
 )
 from src.exceptions import DataContractError, TradingPipelineError
 from src.features.returns import (
@@ -68,9 +70,40 @@ def load_intraday_returns(
         now=now,
     )
     frame = validate_intraday_closes(frame)
+    warn_if_stale(
+        frame["close"],
+        asset.symbol,
+        settings.data_quality.max_zero_return_share,
+    )
     log_return = compute_intraday_log_returns(frame["close"], cfg.bar_minutes)
     validate_log_returns(log_return.to_frame())
     return log_return
+
+
+def load_daily_ohlc(
+    asset: AssetConfig,
+    settings: PipelineSettings,
+    now: datetime | None = None,
+) -> pd.DataFrame:
+    """Descarga, repara (explícitamente) y valida velas diarias OHLC.
+
+    Raises
+    ------
+    DataUnavailableError, DataContractError
+        Si los datos no existen, hay demasiadas velas inconsistentes o no se
+        cumple el contrato tras la reparación.
+    """
+    ohlc = fetch_daily_ohlc(
+        asset.symbol,
+        settings.garch.history_start_date,
+        settings.garch.min_history_days,
+        final_after=DAILY_BAR_FINAL_AFTER[asset.asset_class],
+        now=now,
+    )
+    repaired, _ = repair_ohlc(
+        ohlc, settings.data_quality.max_ohlc_repair_share
+    )
+    return validate_daily_ohlc(repaired)
 
 
 def load_daily_returns(
@@ -85,14 +118,7 @@ def load_daily_returns(
     DataUnavailableError, DataContractError, InsufficientHistoryError
         Si los datos no existen o no cumplen el contrato.
     """
-    close = fetch_daily_closes(
-        asset.symbol,
-        settings.garch.history_start_date,
-        settings.garch.min_history_days,
-        final_after=DAILY_BAR_FINAL_AFTER[asset.asset_class],
-        now=now,
-    )
-    validate_daily_closes(close.to_frame())
+    close = load_daily_ohlc(asset, settings, now)["close"]
     log_return = compute_log_returns(close)
     validate_log_returns(log_return.to_frame())
     return close, log_return

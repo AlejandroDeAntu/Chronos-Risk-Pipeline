@@ -173,6 +173,31 @@ class RetrainTriggerConfig(BaseModel):
     drift_detection_enabled: bool = Field(default=True)
 
 
+class DataQualityConfig(BaseModel):
+    """Umbrales de calidad de la fuente de datos."""
+
+    model_config = {"frozen": True}
+
+    max_ohlc_repair_share: float = Field(
+        default=0.05,
+        ge=0.0,
+        lt=1.0,
+        description=(
+            "Proporción máxima de velas OHLC inconsistentes que se reparan "
+            "antes de rechazar la descarga (Yahoo FX: 1-3% observado)."
+        ),
+    )
+    max_zero_return_share: float = Field(
+        default=0.20,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "Proporción de retornos cero a partir de la cual se advierte "
+            "de cotizaciones rancias."
+        ),
+    )
+
+
 class PathsConfig(BaseModel):
     """Rutas de artefactos persistentes del pipeline.
 
@@ -205,6 +230,7 @@ class PipelineSettings(BaseModel):
     garch: GarchModelConfig = Field(default_factory=GarchModelConfig)
     retrain: RetrainTriggerConfig = Field(default_factory=RetrainTriggerConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
+    data_quality: DataQualityConfig = Field(default_factory=DataQualityConfig)
 
     @field_validator("assets")
     @classmethod

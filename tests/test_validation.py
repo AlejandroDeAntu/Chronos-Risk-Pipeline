@@ -7,55 +7,56 @@ import pandas as pd
 import pytest
 
 from src.data.validation import (
-    validate_daily_closes,
+    validate_daily_ohlc,
     validate_intraday_closes,
     validate_log_returns,
 )
 from src.exceptions import DataContractError
+from tests.helpers import synthetic_ohlc
 
 
-def test_validate_daily_closes_accepts_clean_frame(
+def test_validate_daily_ohlc_accepts_clean_frame(
     synthetic_daily_prices: pd.Series,
 ) -> None:
-    frame = synthetic_daily_prices.to_frame()
-    validated = validate_daily_closes(frame)
+    frame = synthetic_ohlc(synthetic_daily_prices)
+    validated = validate_daily_ohlc(frame)
     assert len(validated) == len(frame)
 
 
-def test_validate_daily_closes_rejects_null_values(
+def test_validate_daily_ohlc_rejects_null_values(
     synthetic_daily_prices: pd.Series,
 ) -> None:
-    frame = synthetic_daily_prices.to_frame()
-    frame.iloc[5, 0] = np.nan
+    frame = synthetic_ohlc(synthetic_daily_prices)
+    frame.iloc[5, 3] = np.nan
     with pytest.raises(DataContractError):
-        validate_daily_closes(frame)
+        validate_daily_ohlc(frame)
 
 
-def test_validate_daily_closes_rejects_non_positive_prices(
+def test_validate_daily_ohlc_rejects_non_positive_prices(
     synthetic_daily_prices: pd.Series,
 ) -> None:
-    frame = synthetic_daily_prices.to_frame()
-    frame.iloc[10, 0] = -1.0
+    frame = synthetic_ohlc(synthetic_daily_prices)
+    frame.iloc[10, :] = -1.0
     with pytest.raises(DataContractError):
-        validate_daily_closes(frame)
+        validate_daily_ohlc(frame)
 
 
-def test_validate_daily_closes_rejects_duplicate_index(
+def test_validate_daily_ohlc_rejects_duplicate_index(
     synthetic_daily_prices: pd.Series,
 ) -> None:
-    frame = synthetic_daily_prices.to_frame()
+    frame = synthetic_ohlc(synthetic_daily_prices)
     duplicated = pd.concat([frame, frame.iloc[[0]]])
     with pytest.raises(DataContractError):
-        validate_daily_closes(duplicated)
+        validate_daily_ohlc(duplicated)
 
 
-def test_validate_daily_closes_rejects_unexpected_column(
+def test_validate_daily_ohlc_rejects_unexpected_column(
     synthetic_daily_prices: pd.Series,
 ) -> None:
-    frame = synthetic_daily_prices.to_frame()
+    frame = synthetic_ohlc(synthetic_daily_prices)
     frame["extra_unvalidated_column"] = 1.0
     with pytest.raises(DataContractError):
-        validate_daily_closes(frame)
+        validate_daily_ohlc(frame)
 
 
 def test_validate_intraday_closes_accepts_clean_frame(
