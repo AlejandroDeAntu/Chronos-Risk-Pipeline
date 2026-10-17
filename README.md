@@ -60,8 +60,8 @@ API key: `yfinance` es pública.
 ```bash
 python -m venv .venv
 .venv\Scripts\activate                 # Windows (macOS/Linux: source .venv/bin/activate)
-pip install -r requirements-dev.txt
-pytest -q                              # 69 pruebas, sin red
+pip install -r requirements-dev.lock   # versiones fijadas (las de CI)
+pytest -q                              # 78 pruebas, sin red
 python run_pipeline.py                 # ciclo completo, todos los activos
 python run_pipeline.py --mode backtest # walk-forward histórico -> reports/
 ```
@@ -94,10 +94,33 @@ p < 0.05). La conclusión honesta es que el componente con valor predictivo
 demostrado es el de volatilidad; el detector de anomalías funciona como
 filtro de atención, no como predictor de reversiones.
 
+### Auditoría del 2026-10-17
+
+Una auditoría independiente
+([`docs/auditoria_2026-10-17.md`](docs/auditoria_2026-10-17.md)) matizó
+estos resultados y corrigió cinco defectos de medición:
+
+- Contra un baseline ingenuo más exigente (EWMA RiskMetrics, λ = 0.94), el
+  GARCH es significativamente mejor solo en los 3 índices (Diebold-Mariano
+  p ≤ 0.001); en los 4 pares FX la ventaja no es significativa.
+- La etiqueta de reversión contaba los empates (retorno 0) como reversión;
+  en EUR/USD el 34% de las velas de 5 min tienen retorno 0, lo que hacía
+  parecer al detector peor que el azar. Corregido, solo USD/CAD tiene una
+  precisión significativamente mayor a la prevalencia tras Bonferroni.
+- Los candidatos ahora se promueven solo con significancia estadística:
+  test binomial de precisión vs prevalencia (anomalías) y Diebold-Mariano
+  vs baseline (GARCH), con `promotion_alpha = 0.05`.
+- La ingesta diaria descarta la vela del día en curso, que Yahoo publica
+  con el último precio y que contaminaba el 67% de los resultados GARCH-FX.
+- Cada corrida registra todas las velas cerradas fuera de muestra desde el
+  entrenamiento del detector (no solo la última), porque GitHub Actions
+  ejecutó solo ~9% de los cron de 15 min programados.
+
 ## Automatización
 
 - `.github/workflows/pipeline.yml`: corre `run_pipeline.py` cada 15 min en
-  horario de mercado (anomalías) y a las 22:00 UTC (GARCH), y versiona
+  horario de mercado (anomalías) y a las 00:30 UTC de mar a sáb (GARCH,
+  cuando ya cerraron las velas diarias de índices y FX), y versiona
   `data/pipeline.db`. GitHub envía un correo si el job falla.
 - `.github/workflows/ci.yml`: en cada push, Ruff (PEP8 a 79 columnas, type
   hints, docstrings, sin `except` genérico) y pytest.
@@ -126,8 +149,13 @@ ORDER BY created_at DESC;
   explícita en ese caso, pero no lo evita.
 - Las velas de 5 minutos solo están disponibles para los últimos 60 días,
   así que la validación del detector usa esa ventana.
-- El horario del cron sigue el mercado de EE. UU.; en forex (24/5) no se
-  evalúan las horas fuera de ese horario.
+- GitHub Actions no garantiza los cron frecuentes: entre el 2026-09-24 y
+  el 2026-10-17 corrió 54 de ~630 ciclos programados. El backfill de
+  velas cerradas evita perder muestra si hay al menos una corrida cada 5
+  días (`predict_period`); un scheduler externo daría puntualidad real.
+- El horario del cron sigue el mercado de EE. UU.; en forex (24/5) las
+  velas fuera de ese horario se registran por backfill en la corrida
+  siguiente.
 - SQLite versionado en el repo alcanza para un solo escritor secuencial;
   con escritores concurrentes habría que migrar `src/persistence/database.py`
   a Postgres.
@@ -156,7 +184,7 @@ run_pipeline.py              punto de entrada único
 src/                         código de producción (config, data, features,
                              models, persistence, evaluation, pipeline,
                              notifications)
-tests/                       69 pruebas pytest (contratos, fuga, métricas,
+tests/                       78 pruebas pytest (contratos, fuga, métricas,
                              disparador, integración, entry point)
 data/pipeline.db             historial auditable (lo crea el pipeline)
 notebooks/                   EDA original (referencia)
