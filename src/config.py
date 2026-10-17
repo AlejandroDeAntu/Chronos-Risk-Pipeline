@@ -90,6 +90,10 @@ class AnomalyDetectorConfig(BaseModel):
         description="Yahoo Finance limita las velas de 5m a 60 días.",
     )
     min_bars_required: int = Field(default=60, ge=20)
+    seasonal_adjustment: bool = Field(
+        default=True,
+        description="Desestacionalizar por hora UTC antes del z-score.",
+    )
 
     @property
     def interval(self) -> str:

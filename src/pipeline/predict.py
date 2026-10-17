@@ -221,6 +221,7 @@ def predict_anomaly_for_asset(
             target_anomaly_rate=cfg.target_anomaly_rate,
             reversion_horizon_bars=cfg.reversion_horizon_bars,
             min_bars_required=cfg.min_bars_required,
+            seasonal=cfg.seasonal_adjustment,
         )
         registry.register_candidate(
             db_path,

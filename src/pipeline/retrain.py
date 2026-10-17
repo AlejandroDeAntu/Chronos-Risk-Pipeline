@@ -122,6 +122,7 @@ def walk_forward_anomaly(
                 target_anomaly_rate=cfg.target_anomaly_rate,
                 reversion_horizon_bars=cfg.reversion_horizon_bars,
                 min_bars_required=cfg.min_bars_required,
+                seasonal=cfg.seasonal_adjustment,
                 version=f"walk_forward_fold_{fold}",
             )
             bands = detector.predict(history, cfg.min_bars_required)
@@ -201,6 +202,7 @@ def retrain_anomaly_model(
         target_anomaly_rate=settings.anomaly.target_anomaly_rate,
         reversion_horizon_bars=settings.anomaly.reversion_horizon_bars,
         min_bars_required=settings.anomaly.min_bars_required,
+        seasonal=settings.anomaly.seasonal_adjustment,
     )
     metrics = {
         "walk_forward_folds": result.n_folds,

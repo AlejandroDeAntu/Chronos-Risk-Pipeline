@@ -34,6 +34,7 @@ class AnomalyPredictionPayload(BaseModel):
     zscore: float
     is_anomaly: bool
     reversion_horizon_bars: int = Field(ge=1)
+    seasonal_factor: float = Field(default=1.0, gt=0.0)
 
     @field_validator("log_return", "rolling_mean", "zscore", "rolling_std")
     @classmethod
