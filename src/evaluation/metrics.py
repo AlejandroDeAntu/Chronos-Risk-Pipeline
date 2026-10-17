@@ -31,6 +31,8 @@ from sklearn.metrics import (
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.stats.proportion import proportion_confint
 
+from src.exceptions import InsufficientHistoryError
+
 _MIN_RELIABLE_SAMPLE = 30
 _LJUNG_BOX_LAG = 10
 
@@ -325,7 +327,8 @@ def diebold_mariano(
     """Test de Diebold-Mariano con error estándar HAC (Newey-West).
 
     H1 (una cola): la pérdida media del modelo es menor que la de la
-    referencia. Rezago HAC: ``ceil(n^(1/3))``.
+    referencia. Rezago HAC: ``ceil(n^(1/3))``; estadístico con la
+    corrección de Harvey-Leybourne-Newbold y p-valor de una t(n-1).
 
     Parameters
     ----------
@@ -342,26 +345,35 @@ def diebold_mariano(
     Raises
     ------
     ValueError
-        Si las longitudes difieren o hay menos de 30 observaciones.
+        Si las longitudes difieren.
+    InsufficientHistoryError
+        Si hay menos de 30 observaciones.
     """
     model = np.asarray(model_loss, dtype=float)
     reference = np.asarray(reference_loss, dtype=float)
     if len(model) != len(reference):
         raise ValueError("Las pérdidas deben tener la misma longitud.")
-    if len(model) < _MIN_RELIABLE_SAMPLE:
-        raise ValueError(
+    n_obs = len(model)
+    if n_obs < _MIN_RELIABLE_SAMPLE:
+        raise InsufficientHistoryError(
             f"Diebold-Mariano requiere >= {_MIN_RELIABLE_SAMPLE} puntos, "
-            f"se recibieron {len(model)}."
+            f"se recibieron {n_obs}."
         )
     diff = model - reference
-    max_lag = int(np.ceil(len(diff) ** (1.0 / 3.0)))
-    fit = sm.OLS(diff, np.ones_like(diff)).fit(
-        cov_type="HAC", cov_kwds={"maxlags": max_lag}
-    )
-    t_stat = float(fit.tvalues[0])
+    if np.allclose(diff, diff[0]):
+        # Diferencial constante: sin varianza, el signo decide.
+        t_stat = 0.0 if diff[0] == 0.0 else float(np.copysign(np.inf, diff[0]))
+    else:
+        max_lag = int(np.ceil(n_obs ** (1.0 / 3.0)))
+        fit = sm.OLS(diff, np.ones_like(diff)).fit(
+            cov_type="HAC", cov_kwds={"maxlags": max_lag}
+        )
+        # Corrección de muestra pequeña de Harvey, Leybourne y Newbold
+        # (1997) para pronósticos a un paso, con referencia t(n-1).
+        t_stat = float(fit.tvalues[0]) * np.sqrt((n_obs - 1) / n_obs)
     return DieboldMarianoResult(
         mean_loss_diff=float(diff.mean()),
         t_stat=t_stat,
-        p_value_one_sided=float(stats.norm.cdf(t_stat)),
-        n_samples=len(diff),
+        p_value_one_sided=float(stats.t.cdf(t_stat, df=n_obs - 1)),
+        n_samples=n_obs,
     )

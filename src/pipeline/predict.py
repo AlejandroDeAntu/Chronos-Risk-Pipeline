@@ -40,7 +40,7 @@ from src.features.returns import (
     compute_intraday_log_returns,
 )
 from src.models.anomaly_model import AnomalyDetector
-from src.models.scenarios import price_quantiles, tail_risk
+from src.models.scenarios import filtered_tail_risk, price_quantiles
 from src.models.volatility import fit_volatility_model, volatility_frame
 from src.notifications.notifier import notify_failure
 from src.persistence import database, registry
@@ -260,9 +260,13 @@ def predict_anomaly_for_asset(
     )
     bands = detector.predict(log_return, cfg.min_bars_required)
     latest = bands.iloc[-1]
-    n_backfilled = _backfill_anomaly_predictions(
-        asset, settings, detector, bands.iloc[:-1], run_ts
-    )
+    try:
+        n_backfilled = _backfill_anomaly_predictions(
+            asset, settings, detector, bands.iloc[:-1], run_ts
+        )
+    except DataContractError as exc:
+        logger.warning("Backfill omitido para '%s': %s", asset.symbol, exc)
+        n_backfilled = 0
 
     try:
         payload = AnomalyPredictionPayload(
@@ -275,6 +279,7 @@ def predict_anomaly_for_asset(
             zscore=float(latest["zscore"]),
             is_anomaly=bool(latest["is_anomaly"]),
             reversion_horizon_bars=detector.reversion_horizon_bars,
+            seasonal_factor=float(latest["seasonal_factor"]),
         )
     except ValidationError as exc:
         raise DataContractError(
@@ -375,8 +380,8 @@ def predict_garch_for_asset(
     horizon, n_paths = cfg.forecast_horizon_days, cfg.n_monte_carlo_paths
     monte_carlo = model.simulate_returns(frame, horizon, n_paths, seed)
     fhs = model.simulate_returns(frame, horizon, n_paths, seed, method="fhs")
-    var_95, cvar_95 = tail_risk(monte_carlo, 0.05)
-    var_99, cvar_99 = tail_risk(monte_carlo, 0.01)
+    var_95, cvar_95 = filtered_tail_risk(model, frame, 0.05)
+    var_99, cvar_99 = filtered_tail_risk(model, frame, 0.01)
 
     try:
         payload = VolatilityForecastPayload(

@@ -2,13 +2,17 @@
 
 Los escenarios vienen de ``VolatilityModel.simulate_returns`` (retornos log
 en %, forma ``(n_paths, horizon)``), sea por Monte Carlo paramétrico o por
-simulación histórica filtrada. Aquí solo se resumen; no se simula nada.
+simulación histórica filtrada, y alimentan los abanicos de precio. El VaR y
+el CVaR publicados usan ``filtered_tail_risk``, el estimador validado.
 """
 
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
+from src.exceptions import ModelFitError
+from src.models.volatility import VolatilityModel
 from src.schemas import PriceQuantiles
 
 PERCENTILES: tuple[int, ...] = (5, 25, 50, 75, 95)
@@ -46,26 +50,42 @@ def price_quantiles(
     ]
 
 
-def tail_risk(
-    sim_returns_pct: np.ndarray, level: float
+def filtered_tail_risk(
+    model: VolatilityModel, frame: pd.DataFrame, level: float
 ) -> tuple[float, float]:
-    """VaR y CVaR del primer día como log-retorno (proporción, negativo).
+    """VaR y CVaR filtrados del día siguiente (log-retorno, proporción).
 
-    El CVaR (expected shortfall) es la pérdida media condicionada a superar
-    el VaR; a diferencia del VaR, es una medida de riesgo coherente.
+    Es el mismo estimador que se valida con Kupiec y Christoffersen en el
+    walk-forward: el cuantil empírico de los residuos estandarizados
+    ``r / sigma`` del historial, multiplicado por la sigma pronosticada. No
+    supone normalidad ni una t; hereda las colas observadas.
 
     Parameters
     ----------
-    sim_returns_pct:
-        Retornos log simulados en %, ``(n_paths, horizon)``.
+    model:
+        Modelo de volatilidad (el campeón).
+    frame:
+        Historial hasta el origen del pronóstico (``volatility_frame``).
     level:
         Probabilidad de cola, p. ej. 0.05.
 
     Returns
     -------
     tuple[float, float]
-        ``(VaR, CVaR)`` del día 1.
+        ``(VaR, CVaR)``; el CVaR es la pérdida media más allá del VaR.
+
+    Raises
+    ------
+    ModelFitError
+        Si no hay residuos estandarizados finitos.
     """
-    day_one = sim_returns_pct[:, 0] / 100.0
-    var = float(np.quantile(day_one, level))
-    return var, float(day_one[day_one <= var].mean())
+    path = model.variance_path(frame).to_numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        standardized = frame["return_pct"].to_numpy() / np.sqrt(path)
+    standardized = standardized[np.isfinite(standardized)]
+    if standardized.size == 0:
+        raise ModelFitError("Sin residuos estandarizados para el VaR.")
+    z_var = float(np.quantile(standardized, level))
+    z_cvar = float(standardized[standardized <= z_var].mean())
+    sigma = float(np.sqrt(model.forecast_variance(frame, 1)[0])) / 100.0
+    return z_var * sigma, z_cvar * sigma

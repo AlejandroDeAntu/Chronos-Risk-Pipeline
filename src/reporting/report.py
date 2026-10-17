@@ -101,7 +101,7 @@ def write_report(
     anomaly_assets = [a for a in data.assets if a.anomaly]
     if anomaly_assets:
         summary["lift"] = save_png(
-            partial(draw_anomaly_lift, assets=data.assets),
+            partial(draw_anomaly_lift, assets=data.assets, alpha=data.alpha),
             figures_dir / "anomaly_lift.png",
             (9.0, 0.45 * len(anomaly_assets) + 1.4),
         )

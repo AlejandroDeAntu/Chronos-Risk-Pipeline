@@ -31,7 +31,10 @@ jobs:
       - name: Generar reporte
         run: python run_pipeline.py --mode report
 
+      # Se publica aunque algún activo falle: el reporte incluye la
+      # sección de errores y el resto de los activos sigue siendo útil.
       - name: Publicar reporte
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: reporte-volatilidad-${{ github.run_number }}

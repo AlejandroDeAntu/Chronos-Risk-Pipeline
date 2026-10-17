@@ -138,7 +138,7 @@ def test_align_fx_daily_moves_close_to_end_of_day() -> None:
     from src.data.validation import align_fx_daily
 
     # Yahoo FX: open ~= close (precio al inicio del día); el rango cubre el
-    # día. El cierre real del día D es el precio al inicio de D+1.
+    # día. El cierre real del día D es el open de la vela D+1.
     frame = _ohlc(
         [
             (1.10, 1.12, 1.09, 1.1001),
@@ -151,8 +151,34 @@ def test_align_fx_daily_moves_close_to_end_of_day() -> None:
 
     # La última vela se descarta: su cierre real aún no existe.
     assert list(aligned.index) == list(frame.index[:2])
-    assert aligned["close"].tolist() == pytest.approx([1.1102, 1.1401])
+    assert aligned["close"].tolist() == pytest.approx([1.11, 1.14])
     assert aligned["open"].tolist() == pytest.approx([1.10, 1.11])
-    # El rango se ensancha para contener el nuevo cierre (1.1401 > 1.13).
-    assert aligned.loc[frame.index[1], "high"] == pytest.approx(1.1401)
+    # El rango se ensancha para contener el nuevo cierre (1.14 > 1.13).
+    assert aligned.loc[frame.index[1], "high"] == pytest.approx(1.14)
     assert validate_daily_ohlc(aligned).equals(aligned)
+
+
+def test_fx_forecast_origin_is_the_day_before_the_run(
+    synthetic_daily_prices: pd.Series, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.config import DAILY_BAR_FINAL_AFTER, AssetClass
+    from src.data.validation import align_fx_daily
+
+    raw = as_yfinance_frame(synthetic_daily_prices, "EURUSD=X")
+    monkeypatch.setattr(fetch, "_download_raw", lambda symbol, **kw: raw)
+    # Corrida a las 00:30 UTC del 2026-09-18: la vela del 18 ya abrió.
+    run_ts = pd.Timestamp("2026-09-18 00:30", tz="UTC").to_pydatetime()
+
+    ohlc = fetch.fetch_daily_ohlc(
+        "EURUSD=X",
+        "2020-01-01",
+        min_rows=10,
+        final_after=DAILY_BAR_FINAL_AFTER[AssetClass.FX],
+        now=run_ts,
+    )
+    aligned = align_fx_daily(ohlc)
+
+    # Origen = 17 (cerrado con el open del 18); el objetivo es el día 18,
+    # que sigue en curso: el pronóstico no llega tarde.
+    assert aligned.index[-1] == pd.Timestamp("2026-09-17")
+    assert aligned["close"].iloc[-1] == pytest.approx(ohlc["open"].iloc[-1])

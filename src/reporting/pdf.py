@@ -184,7 +184,7 @@ def _anomaly_page(data: ReportData, number: int) -> Figure:
         wspace=0.12,
         height_ratios=(1.5, 1.0, 1.0),
     )
-    draw_anomaly_lift(figure.add_subplot(grid[0, :]), data.assets)
+    draw_anomaly_lift(figure.add_subplot(grid[0, :]), data.assets, data.alpha)
     first = figure.add_subplot(grid[1, 0])
     profiles = [first] + [
         figure.add_subplot(grid[1 + i // 4, i % 4], sharey=first)
@@ -213,6 +213,20 @@ def _methodology_page(data: ReportData, number: int) -> Figure:
             0.05, y, wrapped, fontsize=9, color=INK_SECONDARY, va="top"
         )
         y -= 0.022 * wrapped.count("\n")
+    errors = [f"{a.name}: {e}" for a in data.assets for e in a.errors]
+    if errors:
+        y -= 0.05
+        figure.text(0.04, y, "Errores", fontsize=11, weight="bold", va="top")
+        for error in errors:
+            y -= 0.035
+            figure.text(
+                0.05,
+                y,
+                textwrap.fill(f"• {error}", _WRAP),
+                fontsize=8,
+                color=INK_SECONDARY,
+                va="top",
+            )
     return figure
 
 

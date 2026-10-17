@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.config import PipelineSettings
 from src.exceptions import InsufficientHistoryError, ModelFitError
 from src.models.anomaly_model import AnomalyDetector, label_reversion_outcomes
 
@@ -116,3 +117,26 @@ def test_label_reversion_outcomes_drops_zero_return_ties() -> None:
     assert index[1] not in labeled.index
     assert index[2] not in labeled.index
     assert index[0] in labeled.index
+
+
+def test_walk_forward_skips_fold_when_detector_fit_fails(
+    synthetic_intraday_close: pd.Series,
+    test_settings: PipelineSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.features.returns import compute_log_returns
+    from src.pipeline import retrain
+
+    original = retrain.AnomalyDetector.fit
+
+    def flaky(*args: object, **kwargs: object) -> AnomalyDetector:
+        if kwargs.get("version") == "walk_forward_fold_0":
+            raise ModelFitError("umbral no finito")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(retrain.AnomalyDetector, "fit", flaky)
+    result = retrain.walk_forward_anomaly(
+        compute_log_returns(synthetic_intraday_close), test_settings
+    )
+
+    assert result.n_folds == 3

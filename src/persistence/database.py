@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS predictions (
     reference_timestamp TEXT NOT NULL,
     horizon_bars INTEGER NOT NULL,
     payload_json TEXT NOT NULL,
+    -- 0 = pendiente, 1 = evaluada, 2 = superada (no evaluable: se
+    -- generó con una convención de datos que ya no aplica).
     evaluated INTEGER NOT NULL DEFAULT 0,
     UNIQUE(asset_symbol, signal_type, reference_timestamp)
 );
@@ -253,6 +255,19 @@ def insert_outcome(
         )
         conn.execute(
             "UPDATE predictions SET evaluated = 1 WHERE id = ?",
+            (prediction_id,),
+        )
+
+
+def supersede_prediction(db_path: Path, prediction_id: int) -> None:
+    """Marca una predicción como superada (``evaluated = 2``).
+
+    Sale de la cola de pendientes sin registrar un resultado: se conserva
+    para auditoría pero no entra en ninguna métrica.
+    """
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE predictions SET evaluated = 2 WHERE id = ?",
             (prediction_id,),
         )
 

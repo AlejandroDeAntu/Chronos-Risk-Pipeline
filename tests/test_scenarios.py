@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from src.config import PipelineSettings
 from src.evaluation.volatility_selection import walk_forward_volatility
-from src.models.scenarios import price_quantiles, tail_risk
+from src.models.scenarios import filtered_tail_risk, price_quantiles
 from src.models.volatility import volatility_frame
 from src.schemas import PriceQuantiles, VolatilityForecastPayload
 from tests.helpers import synthetic_ohlc
@@ -35,11 +35,25 @@ def test_price_quantiles_follow_cumulative_log_returns() -> None:
     assert widths == sorted(widths)
 
 
-def test_tail_risk_matches_normal_quantiles() -> None:
-    var_95, cvar_95 = tail_risk(_normal_paths(), level=0.05)
-    # VaR 5% de N(0, 1%) = -1.645%; CVaR = -phi(1.645)/0.05 % = -2.063%.
-    assert var_95 == pytest.approx(-0.016449, rel=1e-2)
-    assert cvar_95 == pytest.approx(-0.020627, rel=1e-2)
+def test_filtered_tail_risk_is_the_backtested_estimator(
+    synthetic_daily_prices: pd.Series,
+) -> None:
+    from src.models.volatility import fit_volatility_model
+
+    frame = volatility_frame(synthetic_ohlc(synthetic_daily_prices))
+    model = fit_volatility_model(frame, "garch", 300)
+
+    var_95, cvar_95 = filtered_tail_risk(model, frame, 0.05)
+    var_99, _ = filtered_tail_risk(model, frame, 0.01)
+
+    # Mismo cálculo que el walk-forward: cuantil empírico de r / sigma por
+    # la sigma pronosticada, en proporción de log-retorno.
+    path = model.variance_path(frame).to_numpy()
+    z = frame["return_pct"].to_numpy() / np.sqrt(path)
+    sigma = np.sqrt(model.forecast_variance(frame, 1)[0])
+    assert var_95 == pytest.approx(np.quantile(z, 0.05) * sigma / 100)
+    assert cvar_95 < var_95 < 0.0
+    assert var_99 < var_95
 
 
 def test_price_quantiles_reject_non_monotonic_rows() -> None:

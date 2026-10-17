@@ -97,3 +97,13 @@ def test_legacy_metadata_loads_with_flat_profile() -> None:
     }
     detector = AnomalyDetector.from_metadata(legacy)
     assert detector.seasonal_profile == (1.0,) * 24
+
+
+def test_zero_median_hour_gets_floor_not_typical_factor() -> None:
+    returns = _seasonal_returns()
+    quiet = returns.index.hour == 3
+    returns = returns.where(~quiet, 0.0)  # hora sin cotización nueva
+
+    profile = hourly_profile(returns)
+
+    assert profile[3] == pytest.approx(0.1)

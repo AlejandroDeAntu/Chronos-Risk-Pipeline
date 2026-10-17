@@ -12,6 +12,7 @@ from pathlib import Path
 from string import Template
 
 from src.reporting.data import AssetSection, ReportData
+from src.reporting.figures import TRACKING_DAYS, VAR_DAYS
 from src.reporting.style import FAMILY_LABELS, format_p, format_price
 
 _CSS = """
@@ -79,9 +80,10 @@ _PAGE = Template(
 $kpis
 <p class="note">QLIKE: pérdida de pronóstico de varianza, menor es mejor.
 DM: Diebold-Mariano del campeón contra EWMA (t &lt; 0 favorece al
-campeón; p de una cola). VaR y CVaR: log-retorno del día siguiente con el
-Monte Carlo del campeón. Kupiec y Christoffersen: p-valores del backtest
-del VaR 99%.</p>
+campeón; p de una cola). VaR y CVaR: log-retorno del día siguiente,
+filtrados (cuantil empírico de residuos estandarizados por la volatilidad
+pronosticada): el mismo estimador cuyo backtest reportan Kupiec y
+Christoffersen (VaR 99%).</p>
 </section>
 $assets
 $anomalies
@@ -108,6 +110,14 @@ LIMITATIONS = (
     "re-escalado en entrenamiento.",
     "La historia intradía de Yahoo se limita a 60 días: las métricas del "
     "detector cubren un solo régimen de mercado.",
+    "En FX la ventana del rango alto-bajo de Yahoo no cubre las 24 h "
+    "(~25% de las velas se ensanchan al re-alinear el cierre): la varianza "
+    "por rango en FX es menos fiable que en índices.",
+    "El test de lift del detector trata las velas como independientes; las "
+    "etiquetas se solapan (10 velas) y las anomalías se agrupan, así que su "
+    "p-valor es optimista.",
+    "El piso de promoción exige superar a la desviación móvil de 20 días; "
+    "superar a EWMA se reporta pero no se exige.",
     "Las cifras son estimaciones fuera de muestra sobre datos históricos; "
     "no garantizan desempeño futuro ni constituyen una recomendación de "
     "inversión.",
@@ -211,8 +221,8 @@ def _asset_section(a: AssetSection, figures: dict[str, Path]) -> str:
         classes,
     )
     source = "Fuente: Yahoo Finance"
-    tracking_days = min(500, v.n_common)
-    var_days = min(750, v.var[0.01].n_obs)
+    tracking_days = min(TRACKING_DAYS, v.n_common)
+    var_days = min(VAR_DAYS, v.var[0.01].n_obs)
     captions = {
         "fan": (
             f"{a.name} · escenarios a {len(v.scenarios_mc)} días desde "

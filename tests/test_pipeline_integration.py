@@ -284,3 +284,64 @@ def test_anomaly_backfills_out_of_sample_bars_missed_by_cron(
     assert "11 velas previas recuperadas" in result.detail
     assert n_new == 11
     assert "0 velas previas recuperadas" in again.detail
+
+
+def test_fx_migration_supersedes_v1_predictions_and_replaces_legacy_model(
+    tmp_path: Path, synthetic_daily_prices: pd.Series
+) -> None:
+    from src.config import AssetClass
+
+    fx = AssetConfig(
+        symbol="EURUSD=X", display_name="EUR/USD", asset_class=AssetClass.FX
+    )
+    settings = make_settings(tmp_path, fx, RetrainTriggerConfig())
+    db_path = settings.paths.database_path
+    database.init_db(db_path)
+    # Estado previo al cambio: GARCH heredado (sin 'family') y una
+    # predicción v1 (sin schema_version), como en data/pipeline.db.
+    legacy = {
+        "version": "legacy-garch",
+        "omega": 0.02,
+        "alpha": 0.08,
+        "beta": 0.9,
+        "mu": 0.01,
+        "nu": 6.0,
+        "aic": 0.0,
+        "bic": 0.0,
+        "trained_at": "2026-09-01T00:00:00+00:00",
+        "train_rows": 1000,
+        "train_end": "2026-08-31",
+    }
+    database.insert_model_version(
+        db_path,
+        fx.symbol,
+        SignalType.GARCH_VOLATILITY_FORECAST.value,
+        "legacy-garch",
+        "active",
+        legacy,
+        {},
+        NOW - timedelta(days=2),
+    )
+    origin = synthetic_daily_prices.index[-20].to_pydatetime()
+    database.insert_prediction(
+        db_path,
+        fx.symbol,
+        SignalType.GARCH_VOLATILITY_FORECAST.value,
+        "legacy-garch",
+        origin,
+        1,
+        {"predicted_volatility_pct": 1.0},
+        NOW,
+    )
+
+    result = evaluate_garch_for_asset(fx, settings, NOW)
+
+    assert result.outcomes_closed == 0
+    assert _count(db_path, "outcomes") == 0
+    with sqlite3.connect(db_path) as conn:
+        [status] = conn.execute("SELECT evaluated FROM predictions").fetchone()
+    assert status == 2  # superada, fuera de toda métrica
+    assert result.retrain_decision is not None
+    assert result.retrain_decision.triggered_by == "migration"
+    assert result.retrain_promoted is True
+    assert not registry.active_volatility_is_legacy(db_path, fx.symbol)

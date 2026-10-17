@@ -13,6 +13,7 @@ import pandas as pd
 
 HOURS: tuple[int, ...] = tuple(range(24))
 _MIN_OBS_PER_HOUR = 30
+_MIN_FACTOR = 0.1
 
 
 def hourly_profile(log_return: pd.Series) -> pd.Series:
@@ -42,7 +43,9 @@ def hourly_profile(log_return: pd.Series) -> pd.Series:
     if overall <= 0.0:
         return pd.Series(1.0, index=HOURS, name="seasonal_factor")
     profile = (median_by_hour / overall).reindex(HOURS)
-    profile = profile.where(profile > 0.0).fillna(1.0)
+    # Mediana cero (horas FX sin cotización nueva): piso, no 1.0, para no
+    # inflar el z-score; 1.0 solo para horas sin datos suficientes.
+    profile = profile.clip(lower=_MIN_FACTOR).fillna(1.0)
     return profile.rename("seasonal_factor")
 
 

@@ -25,7 +25,10 @@ datos, por eso también las usa el modo ``backtest`` de ``run_pipeline.py``.
 
 from __future__ import annotations
 
+import hashlib
+import importlib.metadata
 import logging
+import os
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -44,7 +47,7 @@ from src.evaluation.volatility_selection import (
     select_champion,
     walk_forward_volatility,
 )
-from src.exceptions import InsufficientHistoryError
+from src.exceptions import InsufficientHistoryError, ModelFitError
 from src.models.anomaly_model import AnomalyDetector, label_reversion_outcomes
 from src.models.baseline import (
     random_anomaly_baseline,
@@ -137,7 +140,7 @@ def walk_forward_anomaly(
             labeled = label_reversion_outcomes(
                 bands, cfg.reversion_horizon_bars
             )
-        except InsufficientHistoryError as exc:
+        except (InsufficientHistoryError, ModelFitError) as exc:
             logger.info("Bloque %d omitido: %s", fold, exc)
             continue
 
@@ -252,11 +255,34 @@ def retrain_anomaly_model(
     return RetrainOutcome(candidate.version, promote, reason, metrics)
 
 
+def _fingerprint(frame: pd.DataFrame) -> dict[str, Any]:
+    """Huella de datos, código y librerías para reproducir una promoción.
+
+    Yahoo revisa su histórico; sin la huella, una decisión de promoción no
+    se puede volver a ejecutar sobre los mismos datos.
+    """
+    digest = hashlib.sha256(
+        pd.util.hash_pandas_object(frame, index=True).to_numpy().tobytes()
+    ).hexdigest()
+    return {
+        "n_rows": len(frame),
+        "first_date": str(frame.index[0]),
+        "last_date": str(frame.index[-1]),
+        "data_sha256": digest,
+        "git_sha": os.environ.get("GITHUB_SHA"),
+        "versions": {
+            name: importlib.metadata.version(name)
+            for name in ("arch", "numpy", "pandas", "statsmodels", "scipy")
+        },
+    }
+
+
 def retrain_volatility_model(
     asset: AssetConfig,
     settings: PipelineSettings,
     frame: pd.DataFrame,
     current_family: str,
+    force_promote: bool = False,
 ) -> RetrainOutcome:
     """Selecciona la familia campeona, reentrena y promueve si corresponde.
 
@@ -277,6 +303,9 @@ def retrain_volatility_model(
         Salida de ``volatility_frame`` con todo el historial disponible.
     current_family:
         Familia del modelo activo.
+    force_promote:
+        Promover aunque no supere el piso: solo para reemplazar un modelo
+        activo inválido (migración de datos).
 
     Returns
     -------
@@ -292,7 +321,7 @@ def retrain_volatility_model(
     baseline_loss = walk_forward.qlike("sd20")
     common = walk_forward.common_mask
     dm = diebold_mariano(champion_loss[common], baseline_loss[common])
-    promote = dm.p_value_one_sided < alpha
+    promote = force_promote or dm.p_value_one_sided < alpha
 
     candidate = fit_volatility_model(
         frame, decision.champion, settings.garch.min_history_days
@@ -307,6 +336,7 @@ def retrain_volatility_model(
         "failed_families": walk_forward.failed,
         "n_test_days": len(walk_forward.dates),
         "n_common_days": int(walk_forward.common_mask.sum()),
+        "reproducibility": _fingerprint(frame),
         "diebold_mariano_vs_sd20": asdict(dm),
         "promoted": promote,
     }

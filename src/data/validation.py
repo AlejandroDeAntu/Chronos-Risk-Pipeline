@@ -152,11 +152,12 @@ def align_fx_daily(frame: pd.DataFrame) -> pd.DataFrame:
     con el retorno que se quiere pronosticar: fuga de información para
     cualquier modelo que use el rango.
 
-    Corrección: el cierre del día D es el precio al inicio de D+1 (el
-    ``close`` de la vela siguiente). La última vela se descarta porque su
-    cierre real aún no existe, y ``high``/``low`` se ensanchan para
-    contener al nuevo cierre (la ventana del rango de Yahoo no cubre
-    exactamente las 24 h).
+    Corrección: el cierre del día D es el precio al inicio de D+1, el
+    ``open`` de la vela siguiente. El open queda fijo en cuanto la vela
+    abre, así que el día D se puede cerrar sin esperar a que D+1 termine.
+    La última vela se descarta (su cierre real aún no existe) y
+    ``high``/``low`` se ensanchan para contener al nuevo cierre: la ventana
+    del rango de Yahoo FX no cubre las 24 h (~25% de las velas).
 
     Parameters
     ----------
@@ -168,7 +169,7 @@ def align_fx_daily(frame: pd.DataFrame) -> pd.DataFrame:
     pandas.DataFrame
         Copia re-alineada, una fila menos.
     """
-    aligned = frame.assign(close=frame["close"].shift(-1)).iloc[:-1]
+    aligned = frame.assign(close=frame["open"].shift(-1)).iloc[:-1]
     return aligned.assign(
         high=aligned[["high", "open", "close"]].max(axis=1),
         low=aligned[["low", "open", "close"]].min(axis=1),

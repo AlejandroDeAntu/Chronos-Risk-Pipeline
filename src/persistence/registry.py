@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from src.exceptions import ModelRegistryError
 from src.models.anomaly_model import AnomalyDetector
@@ -24,7 +25,7 @@ def register_candidate(
     asset_symbol: str,
     signal_type: SignalType,
     model: AnomalyDetector | VolatilityModel,
-    validation_metrics: dict[str, float],
+    validation_metrics: dict[str, Any],
 ) -> None:
     """Registra un modelo recién entrenado como ``candidate``.
 
@@ -97,6 +98,18 @@ def load_active_anomaly_model(
         raise ModelRegistryError(
             f"Metadata corrupta del detector activo de '{asset_symbol}': {exc}"
         ) from exc
+
+
+def active_volatility_is_legacy(db_path: Path, asset_symbol: str) -> bool:
+    """Indica si el modelo de volatilidad activo es anterior a las familias.
+
+    Los registros sin ``family`` se ajustaron antes de re-alinear las velas
+    FX de Yahoo; en FX deben reemplazarse cuanto antes.
+    """
+    row = database.get_active_model(
+        db_path, asset_symbol, SignalType.GARCH_VOLATILITY_FORECAST.value
+    )
+    return row is not None and "family" not in json.loads(row["metadata_json"])
 
 
 def load_active_volatility_model(

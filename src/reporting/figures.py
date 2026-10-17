@@ -36,8 +36,8 @@ from src.reporting.style import (
 )
 
 PNG_DPI = 200
-_TRACKING_DAYS = 500
-_VAR_DAYS = 750
+TRACKING_DAYS = 500
+VAR_DAYS = 750
 _QQ_MAX_POINTS = 2500
 _STALE_SHARE = 0.20
 
@@ -138,7 +138,7 @@ def draw_fan_chart(
 
 def draw_volatility_tracking(ax: Axes, section: VolatilitySection) -> None:
     """Volatilidad pronosticada (campeón y EWMA) contra la realizada."""
-    data = section.series[section.series["common"]].iloc[-_TRACKING_DAYS:]
+    data = section.series[section.series["common"]].iloc[-TRACKING_DAYS:]
     ax.plot(
         data.index,
         data["realized_vol"],
@@ -232,7 +232,7 @@ def draw_cumulative_qlike(ax: Axes, section: VolatilitySection) -> None:
 
 def draw_var_exceptions(ax: Axes, section: VolatilitySection) -> None:
     """Retornos, VaR 99% filtrado y excepciones de los últimos días."""
-    data = section.series.dropna(subset=["var_01"]).iloc[-_VAR_DAYS:]
+    data = section.series.dropna(subset=["var_01"]).iloc[-VAR_DAYS:]
     hits = data["realized"] < data["var_01"]
     result = section.var[0.01]
     ax.plot(
@@ -275,12 +275,14 @@ def draw_var_exceptions(ax: Axes, section: VolatilitySection) -> None:
     )
 
 
-def draw_anomaly_lift(ax: Axes, assets: Sequence[AssetSection]) -> None:
+def draw_anomaly_lift(
+    ax: Axes, assets: Sequence[AssetSection], alpha: float = 0.05
+) -> None:
     """Lift de precisión con IC 95% por activo (1 = azar)."""
     rows = [a for a in assets if a.anomaly]
     for i, asset in enumerate(rows):
         section = asset.anomaly
-        color = CHAMPION if section.p_bonferroni < 0.05 else INK_MUTED
+        color = CHAMPION if section.p_bonferroni < alpha else INK_MUTED
         low, high = section.lift_ci
         ax.plot(
             [low, high], [i, i], color=color, lw=2.0, solid_capstyle="round"
@@ -304,7 +306,7 @@ def draw_anomaly_lift(ax: Axes, assets: Sequence[AssetSection]) -> None:
     ax.set_xlim(min(lows) - 0.03 * span, max(highs) + 0.45 * span)
     ax.set_yticks(range(len(rows)), [a.name for a in rows])
     ax.invert_yaxis()
-    significant = sum(a.anomaly.p_bonferroni < 0.05 for a in rows)
+    significant = sum(a.anomaly.p_bonferroni < alpha for a in rows)
     style_axes(
         ax,
         f"Precisión / prevalencia con IC 95%: {significant} de {len(rows)} "

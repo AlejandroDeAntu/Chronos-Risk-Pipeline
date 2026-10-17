@@ -122,3 +122,30 @@ def test_comparisons_use_the_common_sample() -> None:
     assert wf.common_mask.sum() == 50
     # En la muestra común ambas pronostican 1.0: misma pérdida media.
     assert wf.mean_qlike("garch") == pytest.approx(wf.mean_qlike("egarch"))
+
+
+def test_family_failing_one_fold_is_excluded_not_the_fold(
+    synthetic_daily_prices: pd.Series,
+    test_settings: PipelineSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.evaluation import volatility_selection
+    from src.exceptions import ModelFitError
+    from src.models.volatility import VolatilityModel, fit_volatility_model
+
+    def flaky(
+        frame: pd.DataFrame, family: str, *args: object, **kw: object
+    ) -> VolatilityModel:
+        if family == "gjr" and "_2" in str(kw.get("version", "")):
+            raise ModelFitError("no convergió")
+        return fit_volatility_model(frame, family, *args, **kw)
+
+    monkeypatch.setattr(volatility_selection, "fit_volatility_model", flaky)
+    frame = volatility_frame(synthetic_ohlc(synthetic_daily_prices))
+
+    wf = walk_forward_volatility(frame, test_settings, ("garch", "gjr"))
+
+    assert "gjr" in wf.failed and "bloque 2" in wf.failed["gjr"]
+    assert "gjr" not in wf.forecasts
+    # La muestra común conserva los cuatro bloques del resto.
+    assert wf.common_mask.all()

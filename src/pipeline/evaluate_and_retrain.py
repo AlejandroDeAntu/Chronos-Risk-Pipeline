@@ -26,7 +26,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.config import AssetConfig, PipelineSettings
+from src.config import AssetClass, AssetConfig, PipelineSettings
 from src.evaluation.feedback_loop import decide_retrain
 from src.evaluation.metrics import (
     evaluate_anomaly_classifier,
@@ -134,6 +134,36 @@ def _record_anomaly_run(
         report=asdict(report),
     )
     return recent
+
+
+def _supersede_misaligned_fx(
+    asset: AssetConfig,
+    settings: PipelineSettings,
+    pending: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Retira predicciones FX v1 de la cola; devuelve las evaluables.
+
+    Las predicciones FX con payload v1 se generaron con el cierre diario de
+    Yahoo fechado al inicio del día; con la re-alineación su origen apunta
+    a otro día y evaluarlas mediría otra cosa.
+    """
+    if asset.asset_class is not AssetClass.FX:
+        return pending
+    keep = []
+    for row in pending:
+        if "schema_version" in json.loads(row["payload_json"]):
+            keep.append(row)
+        else:
+            database.supersede_prediction(
+                settings.paths.database_path, row["id"]
+            )
+    if len(keep) < len(pending):
+        logger.warning(
+            "'%s': %d predicciones FX v1 marcadas como superadas.",
+            asset.symbol,
+            len(pending) - len(keep),
+        )
+    return keep
 
 
 def _close_garch_outcomes(
@@ -351,8 +381,12 @@ def evaluate_garch_for_asset(
 
     frame = volatility_frame(load_daily_ohlc(asset, settings, now))
     log_return = frame["return_pct"] / 100.0
-    pending = database.fetch_pending_predictions(
-        db_path, asset.symbol, signal.value
+    pending = _supersede_misaligned_fx(
+        asset,
+        settings,
+        database.fetch_pending_predictions(
+            db_path, asset.symbol, signal.value
+        ),
     )
     closed = _close_garch_outcomes(settings, pending, log_return, now)
     recent = (
@@ -366,20 +400,35 @@ def evaluate_garch_for_asset(
             settings.retrain.degradation_window_garch,
         )
     )
-    decision = _decide(
-        asset,
-        settings,
-        signal,
-        model.version,
-        model.trained_at,
-        recent,
-        higher_is_better=False,
-        now=now,
+    migrate = asset.asset_class is AssetClass.FX and (
+        registry.active_volatility_is_legacy(db_path, asset.symbol)
     )
+    if migrate:
+        # El modelo FX heredado se ajustó sobre velas desalineadas: se
+        # reemplaza ya, sin esperar cadencia ni degradación.
+        decision = RetrainDecision(
+            asset_symbol=asset.symbol,
+            signal_type=signal,
+            should_retrain=True,
+            reason="Modelo FX ajustado antes de re-alinear las velas.",
+            triggered_by="migration",
+            evaluated_at=now,
+        )
+    else:
+        decision = _decide(
+            asset,
+            settings,
+            signal,
+            model.version,
+            model.trained_at,
+            recent,
+            higher_is_better=False,
+            now=now,
+        )
     promoted = None
     if decision.should_retrain:
         promoted = retrain_volatility_model(
-            asset, settings, frame, model.family
+            asset, settings, frame, model.family, force_promote=migrate
         ).promoted
 
     detail = (

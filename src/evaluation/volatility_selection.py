@@ -29,7 +29,11 @@ from src.evaluation.metrics import (
     diebold_mariano,
     qlike_loss,
 )
-from src.exceptions import InsufficientHistoryError, TradingPipelineError
+from src.exceptions import (
+    InsufficientHistoryError,
+    ModelFitError,
+    TradingPipelineError,
+)
 from src.models.baseline import (
     ewma_volatility_baseline,
     trailing_volatility_baseline,
@@ -165,8 +169,9 @@ def walk_forward_volatility(
     Returns
     -------
     VolatilityWalkForward
-        Pronósticos alineados; una familia que falla en todos los bloques
-        queda en ``failed`` con su causa, nunca se omite en silencio.
+        Pronósticos alineados. Una familia que falla en cualquier bloque
+        (o produce varianzas no finitas) queda en ``failed`` con su causa:
+        compite solo si cubre todos los días de prueba.
 
     Raises
     ------
@@ -201,6 +206,8 @@ def walk_forward_volatility(
         rv_proxy[slots] = _scaled_rv(frame, train, test)
         history = frame.iloc[: test[-1] + 1]
         for family in families:
+            if family in errors:
+                continue  # ya excluida en un bloque anterior
             try:
                 model = fit_volatility_model(
                     frame.iloc[train],
@@ -208,16 +215,30 @@ def walk_forward_volatility(
                     settings.garch.min_history_days,
                     version=f"walk_forward_{family}_{fold}",
                 )
+                # Filtro causal: el tramo de entrenamiento del camino sobre
+                # la historia es el camino del entrenamiento.
+                path = model.variance_path(history).to_numpy()
+                variance = path[test]
+                if not np.all(np.isfinite(variance) & (variance > 0.0)):
+                    raise ModelFitError(
+                        "varianza pronosticada no finita o no positiva"
+                    )
+                quantiles = _training_z_quantiles(
+                    path[train], frame["return_pct"].to_numpy()[train]
+                )
             except TradingPipelineError as exc:
-                errors[family] = f"{type(exc).__name__}: {exc}"
-                logger.info("Bloque %d de %s omitido: %s", fold, family, exc)
+                # Una familia compite solo si cubre todos los bloques: si
+                # no, encogería la muestra común de todos los modelos.
+                errors[family] = f"bloque {fold}: {type(exc).__name__}: {exc}"
+                logger.warning(
+                    "%s excluida del walk-forward (bloque %d): %s",
+                    family,
+                    fold,
+                    exc,
+                )
                 continue
-            variance = model.variance_path(history).to_numpy()[test]
             forecasts[family][slots] = np.sqrt(variance)
-            var_z[family][slots] = _training_z_quantiles(
-                model.variance_path(frame.iloc[train]),
-                frame["return_pct"].iloc[train],
-            )
+            var_z[family][slots] = quantiles
             n_folds[family] += 1
 
     baselines = {
@@ -228,7 +249,7 @@ def walk_forward_volatility(
         raise InsufficientHistoryError(
             "Ningún día de prueba tiene baselines de volatilidad definidos."
         )
-    failed = {f: errors[f] for f in families if n_folds[f] == 0}
+    failed = {f: errors[f] for f in families if f in errors}
     return VolatilityWalkForward(
         dates=tuple(frame.index[test_rows][keep]),
         realized_pct=returns.to_numpy()[test_rows][keep],
@@ -244,11 +265,21 @@ def walk_forward_volatility(
 
 
 def _training_z_quantiles(
-    variance: pd.Series, returns_pct: pd.Series
+    variance: np.ndarray, returns_pct: np.ndarray
 ) -> np.ndarray:
-    """Cuantiles ``VAR_LEVELS`` de ``r / sigma`` en entrenamiento."""
-    standardized = (returns_pct / np.sqrt(variance)).to_numpy()
-    return np.quantile(standardized[np.isfinite(standardized)], VAR_LEVELS)
+    """Cuantiles ``VAR_LEVELS`` de ``r / sigma`` en entrenamiento.
+
+    Raises
+    ------
+    ModelFitError
+        Si no hay residuos estandarizados finitos.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        standardized = returns_pct / np.sqrt(variance)
+    finite = standardized[np.isfinite(standardized)]
+    if finite.size == 0:
+        raise ModelFitError("Sin residuos estandarizados finitos.")
+    return np.quantile(finite, VAR_LEVELS)
 
 
 def _scaled_rv(

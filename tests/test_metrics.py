@@ -13,6 +13,7 @@ from src.evaluation.metrics import (
     precision_lift_test,
     qlike_loss,
 )
+from src.exceptions import InsufficientHistoryError
 from src.models.baseline import ewma_volatility_baseline
 
 
@@ -114,7 +115,7 @@ def test_diebold_mariano_prefers_lower_loss_model() -> None:
 
 
 def test_diebold_mariano_rejects_small_samples() -> None:
-    with pytest.raises(ValueError, match="requiere"):
+    with pytest.raises(InsufficientHistoryError, match="requiere"):
         diebold_mariano(np.ones(10), np.ones(10))
 
 
@@ -128,3 +129,13 @@ def test_ewma_baseline_is_causal_and_matches_recursion() -> None:
         s2.append(0.9 * s2[-1] + 0.1 * r**2)
     assert np.isnan(result.iloc[0])
     assert result.iloc[1:].to_numpy() == pytest.approx(np.sqrt(s2[:-1]))
+
+
+def test_diebold_mariano_handles_constant_differential() -> None:
+    reference = np.linspace(1.0, 2.0, 100)
+    same = diebold_mariano(reference, reference)
+    better = diebold_mariano(reference - 0.1, reference)
+
+    assert same.t_stat == 0.0
+    assert same.p_value_one_sided == pytest.approx(0.5)
+    assert better.p_value_one_sided == pytest.approx(0.0)

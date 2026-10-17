@@ -36,7 +36,7 @@ from src.evaluation.volatility_selection import (
     VolatilityWalkForward,
 )
 from src.exceptions import PersistenceError, TradingPipelineError
-from src.models.scenarios import price_quantiles, tail_risk
+from src.models.scenarios import filtered_tail_risk, price_quantiles
 from src.models.volatility import fit_volatility_model, volatility_frame
 from src.persistence import database
 from src.reporting.style import FAMILY_LABELS, format_p
@@ -115,6 +115,7 @@ class ReportData:
     """Contenido completo del reporte."""
 
     generated_at: datetime
+    alpha: float
     assets: tuple[AssetSection, ...]
     findings: tuple[str, ...]
     live_runs: tuple[dict[str, Any], ...]
@@ -127,7 +128,9 @@ def _residual_nu(standardized: np.ndarray) -> float:
     return float(nu)
 
 
-def _narrative(wf: VolatilityWalkForward, decision: ChampionDecision) -> str:
+def _narrative(
+    wf: VolatilityWalkForward, decision: ChampionDecision, alpha: float
+) -> str:
     """Explica en lenguaje claro la decisión y la muestra comparada."""
     champion = FAMILY_LABELS[decision.champion]
     previous = FAMILY_LABELS[decision.previous]
@@ -147,7 +150,7 @@ def _narrative(wf: VolatilityWalkForward, decision: ChampionDecision) -> str:
     else:
         text = (
             f"{champion} se mantiene como campeón: ningún retador le gana "
-            "con p ajustado por Holm < 0.05."
+            f"con p ajustado por Holm < {alpha}."
         )
     max_folds = max(wf.n_folds.values())
     partial = [
@@ -209,8 +212,8 @@ def _volatility_section(
     monte_carlo = model.simulate_returns(frame, horizon, n_paths, seed)
     fhs = model.simulate_returns(frame, horizon, n_paths, seed, method="fhs")
     last_close = float(item.ohlc["close"].iloc[-1])
-    var_95, cvar_95 = tail_risk(monte_carlo, 0.05)
-    var_99, cvar_99 = tail_risk(monte_carlo, 0.01)
+    var_95, cvar_95 = filtered_tail_risk(model, frame, 0.05)
+    var_99, cvar_99 = filtered_tail_risk(model, frame, 0.01)
 
     dates = pd.DatetimeIndex(wf.dates)
     series = pd.DataFrame(
@@ -231,7 +234,7 @@ def _volatility_section(
     )
     return VolatilitySection(
         champion=champion,
-        narrative=_narrative(wf, decision),
+        narrative=_narrative(wf, decision, settings.retrain.promotion_alpha),
         start=dates[0],
         end=dates[-1],
         n_common=int(common.sum()),
@@ -278,12 +281,17 @@ def _asset_section(
     if item.volatility is not None and item.champion is not None:
         try:
             volatility = _volatility_section(item, settings)
-        except (TradingPipelineError, ValueError) as exc:
+        except (
+            TradingPipelineError,
+            ValueError,
+            ArithmeticError,
+            RuntimeError,
+        ) as exc:
             errors.append(f"reporte de volatilidad: {exc}")
     if item.anomaly is not None:
         try:
             anomaly = _anomaly_section(item, n_tests)
-        except ValueError as exc:
+        except (ValueError, ArithmeticError, RuntimeError) as exc:
             errors.append(f"reporte de anomalías: {exc}")
     return AssetSection(
         symbol=item.asset.symbol,
@@ -308,6 +316,10 @@ def build_findings(
     vol = [a for a in assets if a.volatility]
     anom = [a for a in assets if a.anomaly]
     findings: list[str] = []
+    if not vol:
+        findings.append(
+            "No hay resultados de volatilidad: ver la sección de errores."
+        )
 
     by_champion: dict[str, list[AssetSection]] = {}
     for a in vol:
@@ -316,9 +328,12 @@ def build_findings(
         f"{FAMILY_LABELS[c]} en {len(v)} de {len(vol)} ({_names(v)})"
         for c, v in sorted(by_champion.items(), key=lambda kv: -len(kv[1]))
     ]
-    findings.append(
-        "Modelo campeón de volatilidad por activo: " + "; ".join(parts) + "."
-    )
+    if vol:
+        findings.append(
+            "Modelo campeón de volatilidad por activo: "
+            + "; ".join(parts)
+            + "."
+        )
 
     beats_ewma = [
         a
@@ -457,6 +472,7 @@ def build_report_data(
     }
     return ReportData(
         generated_at=generated_at,
+        alpha=alpha,
         assets=assets,
         findings=build_findings(assets, alpha),
         live_runs=_live_runs(settings.paths.database_path),

@@ -74,7 +74,7 @@ def _backtest_asset(
             )
             stale = float((log_return == 0.0).mean())
             anomaly = walk_forward_anomaly(log_return, settings)
-        except TradingPipelineError as exc:
+        except (TradingPipelineError, ValueError, ArithmeticError) as exc:
             errors.append(f"anomaly: {type(exc).__name__}: {exc}")
     if SignalType.GARCH_VOLATILITY_FORECAST in signals:
         try:
@@ -91,7 +91,7 @@ def _backtest_asset(
                 settings.garch.default_family,
                 settings.retrain.promotion_alpha,
             )
-        except TradingPipelineError as exc:
+        except (TradingPipelineError, ValueError, ArithmeticError) as exc:
             errors.append(f"volatility: {type(exc).__name__}: {exc}")
     for error in errors:
         logger.error("[backtest] %s: %s", asset.symbol, error)

@@ -65,8 +65,9 @@ class PriceQuantiles(BaseModel):
 class VolatilityForecastPayload(BaseModel):
     """Contrato de un pronóstico de volatilidad con escenarios (v2).
 
-    ``var_*`` y ``cvar_*`` son cuantiles del log-retorno del día 1 (en
-    proporción, negativos para pérdidas) bajo el Monte Carlo del modelo.
+    ``var_*`` y ``cvar_*`` son el VaR y CVaR filtrados del día 1 (log-retorno
+    en proporción, negativos para pérdidas): el estimador validado con
+    Kupiec y Christoffersen en el walk-forward.
     Los escenarios de precio se guardan por día del horizonte con dos
     métodos: Monte Carlo paramétrico y simulación histórica filtrada.
     """
@@ -78,10 +79,10 @@ class VolatilityForecastPayload(BaseModel):
     forecast_origin: datetime
     horizon_days: int = Field(ge=1)
     predicted_volatility_pct: float = Field(gt=0.0)
-    var_95: float
-    cvar_95: float
-    var_99: float
-    cvar_99: float
+    var_95: float = Field(allow_inf_nan=False)
+    cvar_95: float = Field(allow_inf_nan=False)
+    var_99: float = Field(allow_inf_nan=False)
+    cvar_99: float = Field(allow_inf_nan=False)
     scenarios_monte_carlo: list[PriceQuantiles]
     scenarios_fhs: list[PriceQuantiles]
 
@@ -103,7 +104,7 @@ class VolatilityForecastPayload(BaseModel):
 
 
 RetrainTrigger = Literal[
-    "fixed_cadence", "degradation", "drift", "cooldown", "none"
+    "fixed_cadence", "degradation", "drift", "cooldown", "migration", "none"
 ]
 
 

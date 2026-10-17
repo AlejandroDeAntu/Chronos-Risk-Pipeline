@@ -33,12 +33,12 @@ import statsmodels.api as sm
 from arch import arch_model
 from scipy import stats
 
+from src.config import VOLATILITY_FAMILIES
 from src.exceptions import InsufficientHistoryError, ModelFitError
 from src.features.range_volatility import realized_variance_proxy, yang_zhang
 
 ArchFamily = Literal["garch", "gjr", "egarch"]
 SimulationMethod = Literal["monte_carlo", "fhs"]
-VOLATILITY_FAMILIES: tuple[str, ...] = ("garch", "gjr", "egarch", "har")
 
 _PCT2 = 1e4  # log-retorno^2 -> %^2
 _HAR_WEEK, _HAR_MONTH = 5, 22
@@ -79,12 +79,31 @@ def volatility_frame(ohlc: pd.DataFrame) -> pd.DataFrame:
 
 
 class VolatilityModel(Protocol):
-    """Contrato que cumplen todas las familias de volatilidad."""
+    """Contrato que cumplen todas las familias de volatilidad.
 
-    family: str
-    version: str
-    trained_at: datetime
-    train_rows: int
+    Los atributos son de solo lectura: las implementaciones son dataclasses
+    congeladas.
+    """
+
+    @property
+    def family(self) -> str:
+        """Familia del modelo."""
+        ...
+
+    @property
+    def version(self) -> str:
+        """Versión registrada."""
+        ...
+
+    @property
+    def trained_at(self) -> datetime:
+        """Instante UTC del ajuste."""
+        ...
+
+    @property
+    def train_rows(self) -> int:
+        """Filas usadas en el ajuste."""
+        ...
 
     def variance_path(self, frame: pd.DataFrame) -> pd.Series:
         """Varianza a un paso para cada fila, con información hasta t-1."""
@@ -202,7 +221,11 @@ class ConditionalVolModel:
         _require_history(frame, min_history_days)
         returns = frame["return_pct"].to_numpy()
         spec = arch_model(
-            returns, mean="Constant", dist="t", **_ARCH_SPECS[family]
+            returns,
+            mean="Constant",
+            dist="t",
+            rescale=False,
+            **_ARCH_SPECS[family],
         )
         try:
             result = spec.fit(disp="off", show_warning=False)
@@ -481,11 +504,16 @@ class HarModel:
         )
         raw = unscaled._raw_path(frame).dropna()
         squared = frame["return_pct"].loc[raw.index] ** 2
-        scale = float(squared.mean() / raw.mean())
+        scale = float(squared.mean() / raw.mean()) if len(raw) else np.nan
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise ModelFitError(f"Escala HAR inválida: {scale}.")
         standardized = frame["return_pct"].loc[raw.index] / np.sqrt(
             scale * raw
         )
-        nu, _, _ = stats.t.fit(standardized.to_numpy(), floc=0.0)
+        try:
+            nu, _, _ = stats.t.fit(standardized.to_numpy(), floc=0.0)
+        except (ValueError, RuntimeError) as exc:
+            raise ModelFitError(f"Ajuste t de residuos HAR: {exc}") from exc
         return cls(
             coef=coef,  # type: ignore[arg-type]
             resid_var=unscaled.resid_var,
@@ -514,9 +542,10 @@ class HarModel:
         # si se piden horizontes largos.
         b0, b1, b2, b3 = self.coef
         last = frame.iloc[-1]
-        log_day = math.log(max(last["rv_day"], self.floor))
-        fixed = b0 + b2 * math.log(max(last["rv_week"], self.floor))
-        fixed += b3 * math.log(max(last["rv_month"], self.floor))
+        # np.fmax ignora NaN (max() de Python lo propagaría).
+        log_day = math.log(np.fmax(last["rv_day"], self.floor))
+        fixed = b0 + b2 * math.log(np.fmax(last["rv_week"], self.floor))
+        fixed += b3 * math.log(np.fmax(last["rv_month"], self.floor))
         variances = []
         for _ in range(horizon):
             log_day = fixed + b1 * log_day
@@ -604,6 +633,8 @@ def model_from_metadata(metadata: dict[str, Any]) -> VolatilityModel:
         Si la metadata está incompleta o corrupta.
     """
     family = metadata.get("family", "garch")
+    if family not in VOLATILITY_FAMILIES:
+        raise ValueError(f"Familia desconocida en metadata: {family!r}.")
     common = {
         "version": str(metadata["version"]),
         "trained_at": datetime.fromisoformat(metadata["trained_at"]),
@@ -632,6 +663,8 @@ def model_from_metadata(metadata: dict[str, Any]) -> VolatilityModel:
     backcast = metadata.get("backcast")
     if backcast is None:
         persistence = params["alpha[1]"] + params["beta[1]"]
+        if persistence >= 1.0:
+            raise ValueError(f"Persistencia {persistence} >= 1 en metadata.")
         backcast = params["omega"] / (1.0 - persistence)
     return ConditionalVolModel(
         family=family,
