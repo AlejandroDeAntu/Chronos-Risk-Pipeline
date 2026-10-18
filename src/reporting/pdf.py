@@ -195,7 +195,7 @@ def _anomaly_page(data: ReportData, number: int) -> Figure:
 
 
 def _methodology_page(data: ReportData, number: int) -> Figure:
-    figure = _page("Metodología y limitaciones", data, number)
+    figure = _page("Metodología", data, number)
     y = 0.89
     for key, value in data.methodology.items():
         wrapped = textwrap.fill(value, 120)
@@ -204,8 +204,13 @@ def _methodology_page(data: ReportData, number: int) -> Figure:
             0.24, y, wrapped, fontsize=9, color=INK_SECONDARY, va="top"
         )
         y -= 0.04 + 0.025 * wrapped.count("\n")
-    y -= 0.02
-    figure.text(0.04, y, "Limitaciones", fontsize=11, weight="bold", va="top")
+    return figure
+
+
+def _limitations_page(data: ReportData, number: int) -> Figure:
+    # Página propia: junto a la metodología no caben y pisan el pie.
+    figure = _page("Limitaciones", data, number)
+    y = 0.93
     for limitation in LIMITATIONS:
         y -= 0.04
         wrapped = textwrap.fill(f"• {limitation}", _WRAP)
@@ -240,6 +245,7 @@ def render_pdf(data: ReportData, path: Path) -> Path:
     if any(a.anomaly for a in data.assets):
         pages.append(_anomaly_page(data, len(pages) + 1))
     pages.append(_methodology_page(data, len(pages) + 1))
+    pages.append(_limitations_page(data, len(pages) + 1))
     with PdfPages(path) as pdf:
         for page in pages:
             pdf.savefig(page, facecolor="white")

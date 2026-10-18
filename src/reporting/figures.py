@@ -230,6 +230,11 @@ def draw_cumulative_qlike(ax: Axes, section: VolatilitySection) -> None:
     style_legend(ax)
 
 
+def _p_clause(value: float) -> str:
+    text = format_p(value)
+    return text if text.startswith("<") else f"= {text}"
+
+
 def draw_var_exceptions(ax: Axes, section: VolatilitySection) -> None:
     """Retornos, VaR 99% filtrado y excepciones de los últimos días."""
     data = section.series.dropna(subset=["var_01"]).iloc[-VAR_DAYS:]
@@ -260,8 +265,8 @@ def draw_var_exceptions(ax: Axes, section: VolatilitySection) -> None:
     style_axes(
         ax,
         f"VaR 99%: {result.n_hits} excepciones en {result.n_obs:,} días "
-        f"({result.hit_rate:.2%}; nominal 1%, Kupiec p = "
-        f"{result.p_unconditional:.2f})",
+        f"({result.hit_rate:.2%}; nominal 1%, Kupiec p "
+        f"{_p_clause(result.p_unconditional)})",
         xlabel=f"Últimos {len(data):,} días de la muestra",
         ylabel="Retorno (%)",
     )
