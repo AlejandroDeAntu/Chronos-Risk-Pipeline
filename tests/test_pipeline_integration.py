@@ -145,7 +145,7 @@ def test_garch_forecast_is_scored_with_qlike(
     _bootstrap(test_settings, SignalType.GARCH_VOLATILITY_FORECAST)
     returns_pct = compute_log_returns(synthetic_daily_prices) * 100.0
     origin = returns_pct.index[-10]
-    active = registry.load_active_garch_model(
+    active = registry.load_active_volatility_model(
         test_settings.paths.database_path, test_asset.symbol
     )
     assert active is not None
@@ -210,7 +210,7 @@ def test_fixed_cadence_forces_garch_retrain(
     )
     _bootstrap(settings, SignalType.GARCH_VOLATILITY_FORECAST)
     db_path = settings.paths.database_path
-    active = registry.load_active_garch_model(db_path, test_asset.symbol)
+    active = registry.load_active_volatility_model(db_path, test_asset.symbol)
     assert active is not None
     stale = dataclasses.replace(
         active, version="stale", trained_at=NOW - timedelta(days=8)
@@ -241,5 +241,107 @@ def test_fixed_cadence_forces_garch_retrain(
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()[0]
     metrics = json.loads(latest)
-    assert metrics["walk_forward_folds"] >= 1
-    assert "baseline_qlike" in metrics["pooled_report"]
+    # Todas las familias compiten; el campeón parte de la familia activa.
+    assert set(metrics["n_folds"]) == {"garch", "gjr", "egarch", "har"}
+    assert metrics["champion_decision"]["previous"] == "garch"
+    assert {"sd20", "ewma"} <= set(metrics["mean_qlike"])
+    assert "p_value_one_sided" in metrics["diebold_mariano_vs_sd20"]
+
+
+def test_anomaly_backfills_out_of_sample_bars_missed_by_cron(
+    test_settings: PipelineSettings,
+    test_asset: AssetConfig,
+    synthetic_intraday_close: pd.Series,
+) -> None:
+    _bootstrap(test_settings, SignalType.ANOMALY)
+    db_path = test_settings.paths.database_path
+    detector = registry.load_active_anomaly_model(db_path, test_asset.symbol)
+    assert detector is not None
+    # Detector "entrenado" 1 h antes de la última vela: las 12 velas de
+    # 5 min posteriores son fuera de muestra y ninguna corrida las vio.
+    trained_at = synthetic_intraday_close.index[-1] - pd.Timedelta(hours=1)
+    older = dataclasses.replace(
+        detector, version="v-backfill", trained_at=trained_at.to_pydatetime()
+    )
+    registry.register_candidate(
+        db_path, test_asset.symbol, SignalType.ANOMALY, older, {}
+    )
+    registry.promote_candidate(
+        db_path, test_asset.symbol, SignalType.ANOMALY, "v-backfill"
+    )
+
+    [result] = run_predictions(test_settings, SignalType.ANOMALY, NOW)
+    [again] = run_predictions(test_settings, SignalType.ANOMALY, NOW)
+
+    with sqlite3.connect(db_path) as conn:
+        n_new = conn.execute(
+            "SELECT COUNT(*) FROM predictions WHERE model_version = ?",
+            ("v-backfill",),
+        ).fetchone()[0]
+    # 11 velas recuperadas + la última, que el arranque en frío ya había
+    # registrado con la versión original (UNIQUE por barra).
+    assert result.succeeded, result.detail
+    assert "11 velas previas recuperadas" in result.detail
+    assert n_new == 11
+    assert "0 velas previas recuperadas" in again.detail
+
+
+def test_fx_migration_supersedes_v1_predictions_and_replaces_legacy_model(
+    tmp_path: Path, synthetic_daily_prices: pd.Series
+) -> None:
+    from src.config import AssetClass
+
+    fx = AssetConfig(
+        symbol="EURUSD=X", display_name="EUR/USD", asset_class=AssetClass.FX
+    )
+    settings = make_settings(tmp_path, fx, RetrainTriggerConfig())
+    db_path = settings.paths.database_path
+    database.init_db(db_path)
+    # Estado previo al cambio: GARCH heredado (sin 'family') y una
+    # predicción v1 (sin schema_version), como en data/pipeline.db.
+    legacy = {
+        "version": "legacy-garch",
+        "omega": 0.02,
+        "alpha": 0.08,
+        "beta": 0.9,
+        "mu": 0.01,
+        "nu": 6.0,
+        "aic": 0.0,
+        "bic": 0.0,
+        "trained_at": "2026-09-01T00:00:00+00:00",
+        "train_rows": 1000,
+        "train_end": "2026-08-31",
+    }
+    database.insert_model_version(
+        db_path,
+        fx.symbol,
+        SignalType.GARCH_VOLATILITY_FORECAST.value,
+        "legacy-garch",
+        "active",
+        legacy,
+        {},
+        NOW - timedelta(days=2),
+    )
+    origin = synthetic_daily_prices.index[-20].to_pydatetime()
+    database.insert_prediction(
+        db_path,
+        fx.symbol,
+        SignalType.GARCH_VOLATILITY_FORECAST.value,
+        "legacy-garch",
+        origin,
+        1,
+        {"predicted_volatility_pct": 1.0},
+        NOW,
+    )
+
+    result = evaluate_garch_for_asset(fx, settings, NOW)
+
+    assert result.outcomes_closed == 0
+    assert _count(db_path, "outcomes") == 0
+    with sqlite3.connect(db_path) as conn:
+        [status] = conn.execute("SELECT evaluated FROM predictions").fetchone()
+    assert status == 2  # superada, fuera de toda métrica
+    assert result.retrain_decision is not None
+    assert result.retrain_decision.triggered_by == "migration"
+    assert result.retrain_promoted is True
+    assert not registry.active_volatility_is_legacy(db_path, fx.symbol)

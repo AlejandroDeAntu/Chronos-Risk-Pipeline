@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import TypeVar
 
 import pandas as pd
 import yfinance as yf
@@ -63,64 +64,112 @@ def _download_raw(symbol: str, **kwargs: str) -> pd.DataFrame:
     )
 
 
-def _extract_close(raw: pd.DataFrame, symbol: str) -> pd.Series:
-    """Extrae la columna de cierre como Series ``float64`` llamada ``close``.
+_OHLC_FIELDS = {"Open": "open", "High": "high", "Low": "low", "Close": "close"}
+_SeriesOrFrame = TypeVar("_SeriesOrFrame", pd.Series, pd.DataFrame)
+
+
+def _extract_field(raw: pd.DataFrame, field: str, symbol: str) -> pd.Series:
+    """Extrae un campo de yfinance como Series ``float64``.
+
+    Normaliza la respuesta, que según la versión de ``yfinance`` trae el
+    campo como Series o como DataFrame de una columna (MultiIndex).
 
     Raises
     ------
     DataUnavailableError
-        Si la respuesta está vacía, no trae ``Close`` o trae varias columnas
-        de cierre.
+        Si la respuesta está vacía, no trae el campo, trae varias columnas
+        para él o no es numérico.
     """
     if raw.empty:
         raise DataUnavailableError(
             f"yfinance devolvió un DataFrame vacío para '{symbol}'."
         )
-    if "Close" not in raw.columns.get_level_values(0):
+    if field not in raw.columns.get_level_values(0):
         raise DataUnavailableError(
-            f"La respuesta para '{symbol}' no incluye la columna 'Close'."
+            f"La respuesta para '{symbol}' no incluye la columna '{field}'."
         )
 
-    close = raw["Close"]
-    if isinstance(close, pd.DataFrame):
-        if close.shape[1] != 1:
+    values = raw[field]
+    if isinstance(values, pd.DataFrame):
+        if values.shape[1] != 1:
             raise DataUnavailableError(
-                f"Se esperaba una columna de cierre para '{symbol}', "
-                f"se obtuvieron {close.shape[1]}."
+                f"Se esperaba una columna '{field}' para '{symbol}', "
+                f"se obtuvieron {values.shape[1]}."
             )
-        close = close.iloc[:, 0]
+        values = values.iloc[:, 0]
 
-    if not pd.api.types.is_numeric_dtype(close):
+    if not pd.api.types.is_numeric_dtype(values):
         raise DataUnavailableError(
-            f"El cierre de '{symbol}' no es numérico (dtype={close.dtype})."
+            f"'{field}' de '{symbol}' no es numérico (dtype={values.dtype})."
         )
-    return close.rename("close").astype("float64")
+    return values.astype("float64")
+
+
+def _extract_close(raw: pd.DataFrame, symbol: str) -> pd.Series:
+    """Extrae el cierre como Series ``float64`` llamada ``close``."""
+    return _extract_field(raw, "Close", symbol).rename("close")
+
+
+def _extract_ohlc(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Extrae open/high/low/close como DataFrame ``float64``."""
+    return pd.DataFrame(
+        {
+            name: _extract_field(raw, field, symbol)
+            for field, name in _OHLC_FIELDS.items()
+        }
+    )
 
 
 def _drop_nulls_and_check_duplicates(
-    close: pd.Series, symbol: str
-) -> pd.Series:
-    """Elimina nulos (registrándolo) y rechaza timestamps duplicados."""
-    n_nulls = int(close.isna().sum())
+    data: _SeriesOrFrame, symbol: str
+) -> _SeriesOrFrame:
+    """Elimina filas con nulos (registrándolo) y rechaza duplicados."""
+    has_null = data.isna()
+    if isinstance(has_null, pd.DataFrame):
+        has_null = has_null.any(axis=1)
+    n_nulls = int(has_null.sum())
     if n_nulls > 0:
         logger.warning(
-            "Se descartaron %d cierres nulos de '%s'.", n_nulls, symbol
+            "Se descartaron %d filas con nulos de '%s'.", n_nulls, symbol
         )
-        close = close.dropna()
+        data = data[~has_null]
 
-    n_duplicates = int(close.index.duplicated().sum())
+    n_duplicates = int(data.index.duplicated().sum())
     if n_duplicates > 0:
         raise DataUnavailableError(
             f"'{symbol}' tiene {n_duplicates} timestamps duplicados; se "
             "rechaza en vez de deduplicar en silencio."
         )
-    return close.sort_index()
+    return data.sort_index()
 
 
 def fetch_daily_closes(
-    symbol: str, start_date: str, min_rows: int
+    symbol: str,
+    start_date: str,
+    min_rows: int,
+    final_after: pd.Timedelta,
+    now: datetime | None = None,
 ) -> pd.Series:
-    """Descarga cierres diarios y los devuelve como Series validada.
+    """Cierres diarios finalizados (columna ``close`` de ``fetch_daily_ohlc``).
+
+    Raises
+    ------
+    DataUnavailableError
+        Si la descarga falla o no alcanza ``min_rows`` filas.
+    """
+    return fetch_daily_ohlc(symbol, start_date, min_rows, final_after, now)[
+        "close"
+    ]
+
+
+def fetch_daily_ohlc(
+    symbol: str,
+    start_date: str,
+    min_rows: int,
+    final_after: pd.Timedelta,
+    now: datetime | None = None,
+) -> pd.DataFrame:
+    """Descarga velas diarias OHLC finalizadas, sin nulos ni duplicados.
 
     Parameters
     ----------
@@ -130,11 +179,21 @@ def fetch_daily_closes(
         Fecha de inicio ``YYYY-MM-DD``.
     min_rows:
         Mínimo de filas utilizables requerido.
+    final_after:
+        Tiempo, desde la medianoche UTC de la fecha de la vela, a partir del
+        cual su cierre es definitivo. Yahoo publica la vela del día en curso
+        con el último precio (en FX, incluso con fecha de sábado); usarla
+        como origen o como resultado real contamina forecast y evaluación.
+    now:
+        Instante UTC de referencia; por defecto, ahora. Se inyecta en tests.
 
     Returns
     -------
-    pandas.Series
-        Cierres diarios sin nulos ni duplicados, en orden cronológico.
+    pandas.DataFrame
+        Columnas ``open``, ``high``, ``low`` y ``close`` (float64), sin
+        nulos ni duplicados, en orden cronológico, solo velas finalizadas.
+        La consistencia OHLC se valida aparte (``repair_ohlc`` y
+        ``validate_daily_ohlc``).
 
     Raises
     ------
@@ -148,14 +207,23 @@ def fetch_daily_closes(
             f"No se pudo descargar el diario de '{symbol}': {exc}"
         ) from exc
 
-    close = _drop_nulls_and_check_duplicates(
-        _extract_close(raw, symbol), symbol
-    )
-    if len(close) < min_rows:
-        raise DataUnavailableError(
-            f"'{symbol}' tiene {len(close)} filas, se requieren {min_rows}."
+    ohlc = _drop_nulls_and_check_duplicates(_extract_ohlc(raw, symbol), symbol)
+    reference = pd.Timestamp(now or datetime.now(UTC)).tz_convert(None)
+    bar_date = ohlc.index.tz_localize(None).normalize()
+    is_final = bar_date + final_after <= reference
+    n_open = int((~is_final).sum())
+    if n_open > 0:
+        logger.info(
+            "Se descartaron %d velas diarias no finalizadas de '%s'.",
+            n_open,
+            symbol,
         )
-    return close
+    ohlc = ohlc[is_final]
+    if len(ohlc) < min_rows:
+        raise DataUnavailableError(
+            f"'{symbol}' tiene {len(ohlc)} filas, se requieren {min_rows}."
+        )
+    return ohlc
 
 
 def fetch_intraday_bars(

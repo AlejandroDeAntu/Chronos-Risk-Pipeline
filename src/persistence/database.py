@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS predictions (
     reference_timestamp TEXT NOT NULL,
     horizon_bars INTEGER NOT NULL,
     payload_json TEXT NOT NULL,
+    -- 0 = pendiente, 1 = evaluada, 2 = superada (no evaluable: se
+    -- generó con una convención de datos que ya no aplica).
     evaluated INTEGER NOT NULL DEFAULT 0,
     UNIQUE(asset_symbol, signal_type, reference_timestamp)
 );
@@ -157,6 +159,50 @@ def insert_prediction(
         return int(cursor.lastrowid) if cursor.rowcount > 0 else None
 
 
+def insert_predictions_bulk(
+    db_path: Path,
+    signal_type: str,
+    horizon_bars: int,
+    payloads: list[dict[str, Any]],
+    run_ts: datetime,
+) -> int:
+    """Inserta varias predicciones en una transacción (idempotente).
+
+    Cada payload debe traer ``asset_symbol``, ``model_version`` y
+    ``observed_at`` (ISO 8601), como los produce
+    ``AnomalyPredictionPayload.model_dump(mode="json")``.
+
+    Returns
+    -------
+    int
+        Filas realmente insertadas (las barras ya registradas se ignoran).
+    """
+    rows = [
+        (
+            run_ts.isoformat(),
+            p["asset_symbol"],
+            signal_type,
+            p["model_version"],
+            datetime.fromisoformat(p["observed_at"]).isoformat(),
+            horizon_bars,
+            json.dumps(p),
+        )
+        for p in payloads
+    ]
+    with _connect(db_path) as conn:
+        before = conn.total_changes
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO predictions
+                (run_ts, asset_symbol, signal_type, model_version,
+                 reference_timestamp, horizon_bars, payload_json, evaluated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            """,
+            rows,
+        )
+        return conn.total_changes - before
+
+
 def fetch_pending_predictions(
     db_path: Path, asset_symbol: str, signal_type: str
 ) -> list[dict[str, Any]]:
@@ -209,6 +255,19 @@ def insert_outcome(
         )
         conn.execute(
             "UPDATE predictions SET evaluated = 1 WHERE id = ?",
+            (prediction_id,),
+        )
+
+
+def supersede_prediction(db_path: Path, prediction_id: int) -> None:
+    """Marca una predicción como superada (``evaluated = 2``).
+
+    Sale de la cola de pendientes sin registrar un resultado: se conserva
+    para auditoría pero no entra en ninguna métrica.
+    """
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE predictions SET evaluated = 2 WHERE id = ?",
             (prediction_id,),
         )
 
@@ -306,6 +365,30 @@ def fetch_recent_evaluation_runs(
             ) ORDER BY evaluated_at ASC
             """,
             (asset_symbol, signal_type, model_version, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_latest_evaluation_runs(db_path: Path) -> list[dict[str, Any]]:
+    """Última corrida de evaluación por activo y señal (monitoreo).
+
+    La agregación se hace en SQL: a Python solo llega una fila por par
+    activo/señal.
+    """
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT e.asset_symbol, e.signal_type, e.model_version,
+                   e.evaluated_at, e.n_outcomes, e.metric_name,
+                   e.model_metric, e.baseline_metric, e.sufficient_data
+            FROM evaluation_runs e
+            JOIN (
+                SELECT asset_symbol, signal_type, MAX(id) AS last_id
+                FROM evaluation_runs
+                GROUP BY asset_symbol, signal_type
+            ) latest ON latest.last_id = e.id
+            ORDER BY e.signal_type, e.asset_symbol
+            """
         ).fetchall()
     return [dict(row) for row in rows]
 

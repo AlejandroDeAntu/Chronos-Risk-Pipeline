@@ -60,6 +60,12 @@ degradación exige al menos 10 anomalías predichas, lo que en operación
 real toma unos 6 días hábiles; antes de eso solo actúan la cadencia fija y
 el detector de drift.
 
+> **Corrección (auditoría 2026-10-17):** los 6 días suponían 36 corridas
+> diarias. GitHub Actions ejecutó ~2 al día, así que el umbral no se alcanzó
+> en 3 semanas (0 de 293 evaluaciones con datos suficientes). El backfill de
+> velas cerradas agregado después lo reduce a ~1–3 días. Ver
+> `docs/auditoria_2026-10-17.md`.
+
 **¿Qué pasa si el pipeline deja de correr o dos corridas chocan?**
 Las corridas están serializadas (un solo grupo de concurrencia en GitHub
 Actions) porque todas escriben en la misma base SQLite. GitHub desactiva
@@ -158,7 +164,10 @@ efectos ARCH sin modelar (p < 0.05).
 Si se compara la precisión del baseline contra el intervalo de confianza
 del modelo:
 - **USD/CAD** queda por encima del baseline.
-- **EUR/USD** queda por debajo.
+- **EUR/USD** queda por debajo. *Corrección (auditoría 2026-10-17): era un
+  artefacto de la etiqueta. El 34% de las velas de EUR/USD tienen retorno 0
+  y se contaban como "reversión", lo que inflaba la prevalencia (0.687 →
+  0.524 sin empates). Corregido, el lift de EUR/USD es 1.05 (p = 0.12).*
 - En los otros 5 activos no se distinguen del azar.
 
 La comparación es orientativa, porque la precisión del baseline también es

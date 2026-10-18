@@ -10,9 +10,10 @@ entrenar. Antes:
 2. Para anomalías se usa ``gap = reversion_horizon_bars`` entre
    entrenamiento y prueba (purga): la etiqueta de una barra mira ``H``
    barras hacia adelante, así que ninguna barra de entrenamiento comparte
-   ventana de resultado con la prueba. El GARCH no tiene horizonte de
-   etiqueta (se ajusta por máxima verosimilitud sobre los propios
-   retornos), por lo que no necesita hueco.
+   ventana de resultado con la prueba. Los modelos de volatilidad no
+   tienen horizonte de etiqueta (se ajustan sobre los propios retornos),
+   por lo que no necesitan hueco; su walk-forward vive en
+   ``src/evaluation/volatility_selection.py``.
 3. Las predicciones de todos los bloques se agrupan y se comparan contra el
    baseline sobre exactamente las mismas observaciones.
 
@@ -24,7 +25,10 @@ datos, por eso también las usa el modo ``backtest`` de ``run_pipeline.py``.
 
 from __future__ import annotations
 
+import hashlib
+import importlib.metadata
 import logging
+import os
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -35,17 +39,20 @@ from sklearn.model_selection import TimeSeriesSplit
 from src.config import AssetConfig, PipelineSettings
 from src.evaluation.metrics import (
     ClassificationReport,
-    RegressionReport,
+    diebold_mariano,
     evaluate_anomaly_classifier,
-    evaluate_volatility_forecast,
+    precision_lift_test,
+)
+from src.evaluation.volatility_selection import (
+    select_champion,
+    walk_forward_volatility,
 )
 from src.exceptions import InsufficientHistoryError, ModelFitError
 from src.models.anomaly_model import AnomalyDetector, label_reversion_outcomes
 from src.models.baseline import (
     random_anomaly_baseline,
-    trailing_volatility_baseline,
 )
-from src.models.garch_model import GarchVolatilityModel
+from src.models.volatility import fit_volatility_model
 from src.persistence import registry
 from src.schemas import SignalType
 
@@ -60,17 +67,11 @@ class AnomalyWalkForwardResult:
     fold_f1: tuple[float, ...]
     fold_baseline_f1: tuple[float, ...]
     pooled: ClassificationReport
-
-
-@dataclass(frozen=True)
-class GarchWalkForwardResult:
-    """Resultado agregado de la validación walk-forward del GARCH."""
-
-    n_folds: int
-    fold_qlike: tuple[float, ...]
-    fold_baseline_qlike: tuple[float, ...]
-    pooled: RegressionReport
-    standardized_residuals: tuple[float, ...]
+    labeled: pd.DataFrame
+    """Velas de prueba de todos los bloques (``zscore``, ``is_anomaly``,
+    ``reverted``, ``seasonal_factor``), para AUC y gráficas."""
+    seasonal_profile: tuple[float, ...]
+    """Perfil horario del detector del último bloque."""
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,8 @@ def walk_forward_anomaly(
     y_base_parts: list[np.ndarray] = []
     fold_f1: list[float] = []
     fold_baseline_f1: list[float] = []
+    labeled_parts: list[pd.DataFrame] = []
+    profile: tuple[float, ...] = ()
 
     for fold, (train_idx, test_idx) in enumerate(splitter.split(log_return)):
         train = log_return.iloc[train_idx]
@@ -129,6 +132,7 @@ def walk_forward_anomaly(
                 target_anomaly_rate=cfg.target_anomaly_rate,
                 reversion_horizon_bars=cfg.reversion_horizon_bars,
                 min_bars_required=cfg.min_bars_required,
+                seasonal=cfg.seasonal_adjustment,
                 version=f"walk_forward_fold_{fold}",
             )
             bands = detector.predict(history, cfg.min_bars_required)
@@ -136,7 +140,7 @@ def walk_forward_anomaly(
             labeled = label_reversion_outcomes(
                 bands, cfg.reversion_horizon_bars
             )
-        except InsufficientHistoryError as exc:
+        except (InsufficientHistoryError, ModelFitError) as exc:
             logger.info("Bloque %d omitido: %s", fold, exc)
             continue
 
@@ -151,6 +155,8 @@ def walk_forward_anomaly(
         y_true_parts.append(y_true)
         y_pred_parts.append(y_pred)
         y_base_parts.append(y_base)
+        labeled_parts.append(labeled)
+        profile = detector.seasonal_profile
 
     if not fold_f1:
         raise InsufficientHistoryError(
@@ -166,91 +172,8 @@ def walk_forward_anomaly(
         fold_f1=tuple(fold_f1),
         fold_baseline_f1=tuple(fold_baseline_f1),
         pooled=pooled,
-    )
-
-
-def walk_forward_garch(
-    log_return: pd.Series, settings: PipelineSettings
-) -> GarchWalkForwardResult:
-    """Valida el GARCH con pronósticos a un paso fuera de muestra.
-
-    En cada bloque los parámetros se estiman solo con el entrenamiento y la
-    varianza se filtra con parámetros fijos: el pronóstico del día ``t`` usa
-    retornos hasta ``t-1``. El baseline es la desviación estándar móvil de
-    los ``baseline_trailing_window`` días previos (``shift(1)``).
-
-    Parameters
-    ----------
-    log_return:
-        Retornos diarios, en orden cronológico.
-    settings:
-        Configuración del pipeline.
-
-    Returns
-    -------
-    GarchWalkForwardResult
-        QLIKE por bloque, reporte agrupado y residuos estandarizados.
-
-    Raises
-    ------
-    InsufficientHistoryError
-        Si ningún bloque pudo evaluarse.
-    """
-    cfg = settings.garch
-    returns_pct = log_return * 100.0
-    baseline_all = trailing_volatility_baseline(
-        returns_pct, cfg.baseline_trailing_window
-    ).to_numpy()
-    values = returns_pct.to_numpy()
-    splitter = TimeSeriesSplit(n_splits=settings.retrain.walk_forward_splits)
-
-    predicted_parts: list[np.ndarray] = []
-    realized_parts: list[np.ndarray] = []
-    baseline_parts: list[np.ndarray] = []
-    fold_qlike: list[float] = []
-    fold_baseline_qlike: list[float] = []
-
-    for fold, (train_idx, test_idx) in enumerate(splitter.split(values)):
-        try:
-            model = GarchVolatilityModel.fit(
-                log_return.iloc[train_idx],
-                cfg.min_history_days,
-                version=f"walk_forward_fold_{fold}",
-            )
-        except (InsufficientHistoryError, ModelFitError) as exc:
-            logger.info("Bloque %d omitido: %s", fold, exc)
-            continue
-
-        variance = model.conditional_variance_path(values[: test_idx[-1] + 1])
-        predicted = np.sqrt(variance[test_idx])
-        realized = values[test_idx]
-        baseline = baseline_all[test_idx]
-        valid = np.isfinite(baseline) & (baseline > 0.0)
-
-        report = evaluate_volatility_forecast(
-            predicted[valid], realized[valid], baseline[valid]
-        )
-        fold_qlike.append(report.qlike)
-        fold_baseline_qlike.append(report.baseline_qlike)
-        predicted_parts.append(predicted[valid])
-        realized_parts.append(realized[valid])
-        baseline_parts.append(baseline[valid])
-
-    if not fold_qlike:
-        raise InsufficientHistoryError(
-            "Ningún bloque walk-forward del GARCH tuvo datos suficientes."
-        )
-    predicted_all = np.concatenate(predicted_parts)
-    realized_all = np.concatenate(realized_parts)
-    pooled = evaluate_volatility_forecast(
-        predicted_all, realized_all, np.concatenate(baseline_parts)
-    )
-    return GarchWalkForwardResult(
-        n_folds=len(fold_qlike),
-        fold_qlike=tuple(fold_qlike),
-        fold_baseline_qlike=tuple(fold_baseline_qlike),
-        pooled=pooled,
-        standardized_residuals=tuple(realized_all / predicted_all),
+        labeled=pd.concat(labeled_parts),
+        seasonal_profile=profile,
     )
 
 
@@ -278,7 +201,14 @@ def retrain_anomaly_model(
     enough_positives = (
         pooled.n_predicted_positive >= settings.retrain.min_predicted_positives
     )
-    promote = pooled.beats_baseline_f1 and enough_positives
+    # F1 contra UNA tirada aleatoria es casi una moneda al aire cuando el
+    # detector está cerca del azar: se exige significancia sobre el lift.
+    lift = precision_lift_test(pooled) if enough_positives else None
+    promote = (
+        lift is not None
+        and lift.lift > 1.0
+        and lift.p_value < settings.retrain.promotion_alpha
+    )
 
     candidate = AnomalyDetector.fit(
         log_return=log_return,
@@ -286,10 +216,12 @@ def retrain_anomaly_model(
         target_anomaly_rate=settings.anomaly.target_anomaly_rate,
         reversion_horizon_bars=settings.anomaly.reversion_horizon_bars,
         min_bars_required=settings.anomaly.min_bars_required,
+        seasonal=settings.anomaly.seasonal_adjustment,
     )
     metrics = {
         "walk_forward_folds": result.n_folds,
         "pooled_report": asdict(pooled),
+        "precision_lift": asdict(lift) if lift is not None else None,
         "promoted": promote,
     }
     registry.register_candidate(
@@ -299,11 +231,12 @@ def retrain_anomaly_model(
         candidate,
         metrics,
     )
-    reason = (
-        f"F1 walk-forward {pooled.f1:.3f} vs baseline "
-        f"{pooled.baseline_f1:.3f}; anomalías predichas "
-        f"{pooled.n_predicted_positive}"
+    lift_text = (
+        f"lift precisión {lift.lift:.3f} (p={lift.p_value:.4f})"
+        if lift is not None
+        else "positivos insuficientes"
     )
+    reason = f"{lift_text}; anomalías {pooled.n_predicted_positive}"
     if promote:
         registry.promote_candidate(
             settings.paths.database_path,
@@ -322,10 +255,43 @@ def retrain_anomaly_model(
     return RetrainOutcome(candidate.version, promote, reason, metrics)
 
 
-def retrain_garch_model(
-    asset: AssetConfig, settings: PipelineSettings, log_return: pd.Series
+def _fingerprint(frame: pd.DataFrame) -> dict[str, Any]:
+    """Huella de datos, código y librerías para reproducir una promoción.
+
+    Yahoo revisa su histórico; sin la huella, una decisión de promoción no
+    se puede volver a ejecutar sobre los mismos datos.
+    """
+    digest = hashlib.sha256(
+        pd.util.hash_pandas_object(frame, index=True).to_numpy().tobytes()
+    ).hexdigest()
+    return {
+        "n_rows": len(frame),
+        "first_date": str(frame.index[0]),
+        "last_date": str(frame.index[-1]),
+        "data_sha256": digest,
+        "git_sha": os.environ.get("GITHUB_SHA"),
+        "versions": {
+            name: importlib.metadata.version(name)
+            for name in ("arch", "numpy", "pandas", "statsmodels", "scipy")
+        },
+    }
+
+
+def retrain_volatility_model(
+    asset: AssetConfig,
+    settings: PipelineSettings,
+    frame: pd.DataFrame,
+    current_family: str,
+    force_promote: bool = False,
 ) -> RetrainOutcome:
-    """Valida, reentrena y promueve (si corresponde) el GARCH de un activo.
+    """Selecciona la familia campeona, reentrena y promueve si corresponde.
+
+    1. Walk-forward de todas las familias candidatas en los mismos días.
+    2. Champion-challenger: el campeón vigente solo cambia si un retador le
+       gana con Diebold-Mariano significativo tras el ajuste de Holm.
+    3. Piso de calidad: el campeón debe superar al baseline SD-20d con
+       Diebold-Mariano (``promotion_alpha``); si no, se registra como
+       candidato y el modelo activo sigue sirviendo.
 
     Parameters
     ----------
@@ -333,24 +299,45 @@ def retrain_garch_model(
         Activo a reentrenar.
     settings:
         Configuración del pipeline.
-    log_return:
-        Retornos diarios disponibles.
+    frame:
+        Salida de ``volatility_frame`` con todo el historial disponible.
+    current_family:
+        Familia del modelo activo.
+    force_promote:
+        Promover aunque no supere el piso: solo para reemplazar un modelo
+        activo inválido (migración de datos).
 
     Returns
     -------
     RetrainOutcome
         Versión candidata, si se promovió y por qué.
     """
-    result = walk_forward_garch(log_return, settings)
-    pooled = result.pooled
-    promote = pooled.beats_baseline_qlike
+    alpha = settings.retrain.promotion_alpha
+    walk_forward = walk_forward_volatility(
+        frame, settings, settings.garch.candidate_families
+    )
+    decision = select_champion(walk_forward, current_family, alpha)
+    champion_loss = walk_forward.qlike(decision.champion)
+    baseline_loss = walk_forward.qlike("sd20")
+    common = walk_forward.common_mask
+    dm = diebold_mariano(champion_loss[common], baseline_loss[common])
+    promote = force_promote or dm.p_value_one_sided < alpha
 
-    candidate = GarchVolatilityModel.fit(
-        log_return, settings.garch.min_history_days
+    candidate = fit_volatility_model(
+        frame, decision.champion, settings.garch.min_history_days
     )
     metrics = {
-        "walk_forward_folds": result.n_folds,
-        "pooled_report": asdict(pooled),
+        "champion_decision": asdict(decision),
+        "mean_qlike": {
+            name: walk_forward.mean_qlike(name)
+            for name in (*walk_forward.forecasts, "sd20", "ewma")
+        },
+        "n_folds": walk_forward.n_folds,
+        "failed_families": walk_forward.failed,
+        "n_test_days": len(walk_forward.dates),
+        "n_common_days": int(walk_forward.common_mask.sum()),
+        "reproducibility": _fingerprint(frame),
+        "diebold_mariano_vs_sd20": asdict(dm),
         "promoted": promote,
     }
     registry.register_candidate(
@@ -361,8 +348,8 @@ def retrain_garch_model(
         metrics,
     )
     reason = (
-        f"QLIKE walk-forward {pooled.qlike:.4f} vs baseline "
-        f"{pooled.baseline_qlike:.4f}"
+        f"{decision.reason} Campeón '{decision.champion}' vs SD-20d: DM "
+        f"t={dm.t_stat:.2f} (p={dm.p_value_one_sided:.4f})"
     )
     if promote:
         registry.promote_candidate(
@@ -371,11 +358,11 @@ def retrain_garch_model(
             SignalType.GARCH_VOLATILITY_FORECAST,
             candidate.version,
         )
-        logger.info("GARCH de '%s' promovido: %s.", asset.symbol, reason)
+        logger.info("Volatilidad de '%s' promovida: %s.", asset.symbol, reason)
     else:
         logger.warning(
-            "GARCH candidato de '%s' NO promovido (%s); se mantiene el "
-            "modelo activo.",
+            "Modelo de volatilidad candidato de '%s' NO promovido (%s); se "
+            "mantiene el activo.",
             asset.symbol,
             reason,
         )

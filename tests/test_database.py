@@ -126,3 +126,27 @@ def test_last_registration_time(db_path: Path) -> None:
     assert (
         database.get_last_registration_time(db_path, "TEST", "anomaly") == RUN
     )
+
+
+def test_fetch_latest_evaluation_runs_returns_one_row_per_pair(
+    db_path: Path,
+) -> None:
+    for minute, metric in ((1, 0.1), (2, 0.2)):
+        database.insert_evaluation_run(
+            db_path,
+            "^GSPC",
+            "anomaly",
+            "v1",
+            datetime(2026, 9, 21, 12, minute, tzinfo=UTC),
+            100,
+            "f1",
+            metric,
+            0.1,
+            True,
+            {},
+        )
+
+    [row] = database.fetch_latest_evaluation_runs(db_path)
+
+    assert row["asset_symbol"] == "^GSPC"
+    assert row["model_metric"] == 0.2

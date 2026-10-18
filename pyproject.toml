@@ -11,8 +11,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 79
 target-version = "py311"
-# El notebook es el EDA original (referencia), no código de producción.
-extend-exclude = ["notebooks"]
+# El notebook es el EDA original (referencia), no código de producción, y
+# docs/ tiene fragmentos de código ilustrativos dentro de Markdown.
+extend-exclude = ["notebooks", "docs"]
 
 [tool.ruff.lint]
 select = [

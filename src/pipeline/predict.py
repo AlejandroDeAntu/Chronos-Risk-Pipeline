@@ -18,34 +18,43 @@ from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
-from src.config import AssetConfig, PipelineSettings
-from src.data.fetch import fetch_daily_closes, fetch_intraday_bars
+from src.config import (
+    DAILY_BAR_FINAL_AFTER,
+    AssetClass,
+    AssetConfig,
+    PipelineSettings,
+)
+from src.data.fetch import fetch_daily_ohlc, fetch_intraday_bars
 from src.data.validation import (
-    validate_daily_closes,
+    align_fx_daily,
+    repair_ohlc,
+    validate_daily_ohlc,
     validate_intraday_closes,
     validate_log_returns,
+    warn_if_stale,
 )
 from src.exceptions import DataContractError, TradingPipelineError
 from src.features.returns import (
     compute_intraday_log_returns,
-    compute_log_returns,
 )
 from src.models.anomaly_model import AnomalyDetector
-from src.models.garch_model import GarchVolatilityModel
+from src.models.scenarios import filtered_tail_risk, price_quantiles
+from src.models.volatility import fit_volatility_model, volatility_frame
 from src.notifications.notifier import notify_failure
 from src.persistence import database, registry
 from src.pipeline.results import AssetStageResult, Stage
 from src.schemas import (
     AnomalyPredictionPayload,
-    GarchForecastPayload,
     SignalType,
+    VolatilityForecastPayload,
 )
 
 logger = logging.getLogger(__name__)
 
 _COLD_START_METRICS = {"note": "arranque en frío, sin validación previa"}
+_PAYLOAD_LIST = TypeAdapter(list[AnomalyPredictionPayload])
 
 
 def load_intraday_returns(
@@ -67,30 +76,126 @@ def load_intraday_returns(
         now=now,
     )
     frame = validate_intraday_closes(frame)
+    warn_if_stale(
+        frame["close"],
+        asset.symbol,
+        settings.data_quality.max_zero_return_share,
+    )
     log_return = compute_intraday_log_returns(frame["close"], cfg.bar_minutes)
     validate_log_returns(log_return.to_frame())
     return log_return
 
 
-def load_daily_returns(
-    asset: AssetConfig, settings: PipelineSettings
-) -> tuple[pd.Series, pd.Series]:
-    """Descarga y valida cierres diarios; devuelve ``(close, log_return)``.
+def load_daily_ohlc_with_repairs(
+    asset: AssetConfig,
+    settings: PipelineSettings,
+    now: datetime | None = None,
+) -> tuple[pd.DataFrame, int]:
+    """Descarga, alinea (FX), repara y valida velas diarias OHLC.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, int]
+        Velas validadas y número de velas que hubo que reparar (se
+        reporta como indicador de calidad de la fuente).
 
     Raises
     ------
-    DataUnavailableError, DataContractError, InsufficientHistoryError
-        Si los datos no existen o no cumplen el contrato.
+    DataUnavailableError, DataContractError
+        Si los datos no existen, hay demasiadas velas inconsistentes o no se
+        cumple el contrato tras la reparación.
     """
-    close = fetch_daily_closes(
+    ohlc = fetch_daily_ohlc(
         asset.symbol,
         settings.garch.history_start_date,
         settings.garch.min_history_days,
+        final_after=DAILY_BAR_FINAL_AFTER[asset.asset_class],
+        now=now,
     )
-    validate_daily_closes(close.to_frame())
-    log_return = compute_log_returns(close)
-    validate_log_returns(log_return.to_frame())
-    return close, log_return
+    if asset.asset_class is AssetClass.FX:
+        ohlc = align_fx_daily(ohlc)
+    repaired, n_repaired = repair_ohlc(
+        ohlc, settings.data_quality.max_ohlc_repair_share
+    )
+    return validate_daily_ohlc(repaired), n_repaired
+
+
+def load_daily_ohlc(
+    asset: AssetConfig,
+    settings: PipelineSettings,
+    now: datetime | None = None,
+) -> pd.DataFrame:
+    """Velas diarias OHLC validadas (ver ``load_daily_ohlc_with_repairs``).
+
+    Raises
+    ------
+    DataUnavailableError, DataContractError
+        Si los datos no existen o no cumplen el contrato.
+    """
+    return load_daily_ohlc_with_repairs(asset, settings, now)[0]
+
+
+def _backfill_anomaly_predictions(
+    asset: AssetConfig,
+    settings: PipelineSettings,
+    detector: AnomalyDetector,
+    bands: pd.DataFrame,
+    run_ts: datetime,
+) -> int:
+    """Registra las velas cerradas que ninguna corrida previa alcanzó a ver.
+
+    GitHub Actions descarta la mayoría de los cron de 15 min (54 corridas en
+    23 días en vez de ~590), así que predecir solo la última vela deja un
+    ~4% de las barras en la base. Solo se recuperan velas posteriores al
+    entrenamiento del detector: anteriores serían in-sample.
+
+    Parameters
+    ----------
+    asset, settings:
+        Activo y configuración.
+    detector:
+        Detector activo.
+    bands:
+        Salida de ``detector.predict`` sin la última vela.
+    run_ts:
+        Instante UTC de la corrida.
+
+    Returns
+    -------
+    int
+        Filas nuevas insertadas (las ya existentes se ignoran).
+
+    Raises
+    ------
+    DataContractError
+        Si alguna fila no cumple ``AnomalyPredictionPayload``.
+    """
+    out_of_sample = bands[bands.index > pd.Timestamp(detector.trained_at)]
+    if out_of_sample.empty:
+        return 0
+    records = (
+        out_of_sample.rename_axis("observed_at")
+        .reset_index()
+        .assign(
+            asset_symbol=asset.symbol,
+            model_version=detector.version,
+            reversion_horizon_bars=detector.reversion_horizon_bars,
+        )
+        .to_dict("records")
+    )
+    try:
+        payloads = _PAYLOAD_LIST.validate_python(records)
+    except ValidationError as exc:
+        raise DataContractError(
+            f"Backfill de anomalías inválido para '{asset.symbol}': {exc}"
+        ) from exc
+    return database.insert_predictions_bulk(
+        db_path=settings.paths.database_path,
+        signal_type=SignalType.ANOMALY.value,
+        horizon_bars=detector.reversion_horizon_bars,
+        payloads=[p.model_dump(mode="json") for p in payloads],
+        run_ts=run_ts,
+    )
 
 
 def predict_anomaly_for_asset(
@@ -137,6 +242,7 @@ def predict_anomaly_for_asset(
             target_anomaly_rate=cfg.target_anomaly_rate,
             reversion_horizon_bars=cfg.reversion_horizon_bars,
             min_bars_required=cfg.min_bars_required,
+            seasonal=cfg.seasonal_adjustment,
         )
         registry.register_candidate(
             db_path,
@@ -152,7 +258,15 @@ def predict_anomaly_for_asset(
     log_return = load_intraday_returns(
         asset, settings, cfg.predict_period, run_ts
     )
-    latest = detector.predict(log_return, cfg.min_bars_required).iloc[-1]
+    bands = detector.predict(log_return, cfg.min_bars_required)
+    latest = bands.iloc[-1]
+    try:
+        n_backfilled = _backfill_anomaly_predictions(
+            asset, settings, detector, bands.iloc[:-1], run_ts
+        )
+    except DataContractError as exc:
+        logger.warning("Backfill omitido para '%s': %s", asset.symbol, exc)
+        n_backfilled = 0
 
     try:
         payload = AnomalyPredictionPayload(
@@ -165,6 +279,7 @@ def predict_anomaly_for_asset(
             zscore=float(latest["zscore"]),
             is_anomaly=bool(latest["is_anomaly"]),
             reversion_horizon_bars=detector.reversion_horizon_bars,
+            seasonal_factor=float(latest["seasonal_factor"]),
         )
     except ValidationError as exc:
         raise DataContractError(
@@ -183,7 +298,8 @@ def predict_anomaly_for_asset(
     )
     detail = (
         f"vela {payload.observed_at:%Y-%m-%d %H:%M} UTC, "
-        f"z={payload.zscore:.2f}, anomalía={payload.is_anomaly}"
+        f"z={payload.zscore:.2f}, anomalía={payload.is_anomaly}, "
+        f"{n_backfilled} velas previas recuperadas"
     )
     if prediction_id is None:
         detail += " (ya registrada, no se duplica)"
@@ -225,16 +341,22 @@ def predict_garch_for_asset(
     """
     cfg = settings.garch
     db_path = settings.paths.database_path
-    close, log_return = load_daily_returns(asset, settings)
+    ohlc = load_daily_ohlc(asset, settings, run_ts)
+    close = ohlc["close"]
+    frame = volatility_frame(ohlc)
 
-    model = registry.load_active_garch_model(db_path, asset.symbol)
+    model = registry.load_active_volatility_model(db_path, asset.symbol)
     cold_start = model is None
     if model is None:
         logger.warning(
-            "'%s' sin GARCH activo: ajustando el primero (arranque en frío).",
+            "'%s' sin modelo de volatilidad activo: ajustando %s "
+            "(arranque en frío).",
             asset.symbol,
+            cfg.default_family,
         )
-        model = GarchVolatilityModel.fit(log_return, cfg.min_history_days)
+        model = fit_volatility_model(
+            frame, cfg.default_family, cfg.min_history_days
+        )
         registry.register_candidate(
             db_path,
             asset.symbol,
@@ -249,38 +371,38 @@ def predict_garch_for_asset(
             model.version,
         )
 
-    returns_pct = (log_return * 100.0).to_numpy()
     forecast_origin = close.index[-1].to_pydatetime()
     # zlib.crc32 es determinista entre procesos (hash() de str no lo es).
     seed = zlib.crc32(
         f"{asset.symbol}|{model.version}|{forecast_origin}".encode()
     )
-    sim_returns_pct = model.simulate_paths(
-        returns_pct, cfg.forecast_horizon_days, cfg.n_monte_carlo_paths, seed
-    )
-    sim_log_returns = sim_returns_pct / 100.0
-    final_prices = float(close.iloc[-1]) * np.exp(sim_log_returns.sum(axis=1))
-    day1 = sim_log_returns[:, 0]
-    var_95 = float(np.percentile(day1, 5.0))
+    last_close = float(close.iloc[-1])
+    horizon, n_paths = cfg.forecast_horizon_days, cfg.n_monte_carlo_paths
+    monte_carlo = model.simulate_returns(frame, horizon, n_paths, seed)
+    fhs = model.simulate_returns(frame, horizon, n_paths, seed, method="fhs")
+    var_95, cvar_95 = filtered_tail_risk(model, frame, 0.05)
+    var_99, cvar_99 = filtered_tail_risk(model, frame, 0.01)
 
     try:
-        payload = GarchForecastPayload(
+        payload = VolatilityForecastPayload(
             asset_symbol=asset.symbol,
             model_version=model.version,
+            model_family=model.family,
             forecast_origin=forecast_origin,
-            horizon_days=cfg.forecast_horizon_days,
-            predicted_volatility_pct=model.forecast_next_volatility_pct(
-                returns_pct
+            horizon_days=horizon,
+            predicted_volatility_pct=float(
+                np.sqrt(model.forecast_variance(frame, 1)[0])
             ),
-            predicted_price_median=float(np.percentile(final_prices, 50.0)),
-            predicted_price_p05=float(np.percentile(final_prices, 5.0)),
-            predicted_price_p95=float(np.percentile(final_prices, 95.0)),
             var_95=var_95,
-            cvar_95=float(day1[day1 <= var_95].mean()),
+            cvar_95=cvar_95,
+            var_99=var_99,
+            cvar_99=cvar_99,
+            scenarios_monte_carlo=price_quantiles(last_close, monte_carlo),
+            scenarios_fhs=price_quantiles(last_close, fhs),
         )
     except ValidationError as exc:
         raise DataContractError(
-            f"Forecast GARCH inválido para '{asset.symbol}': {exc}"
+            f"Pronóstico de volatilidad inválido para '{asset.symbol}': {exc}"
         ) from exc
 
     prediction_id = database.insert_prediction(
@@ -294,9 +416,9 @@ def predict_garch_for_asset(
         run_ts=run_ts,
     )
     detail = (
-        f"origen {forecast_origin:%Y-%m-%d}, "
+        f"{model.family} origen {forecast_origin:%Y-%m-%d}, "
         f"vol 1d={payload.predicted_volatility_pct:.3f}%, "
-        f"VaR95={payload.var_95:.4f}"
+        f"VaR95={payload.var_95:.4f}, VaR99={payload.var_99:.4f}"
     )
     if prediction_id is None:
         detail += " (ya registrado, no se duplica)"

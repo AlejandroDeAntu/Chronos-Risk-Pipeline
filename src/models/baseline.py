@@ -41,3 +41,24 @@ def trailing_volatility_baseline(
     se comparan con la misma información disponible.
     """
     return returns_pct.rolling(window=window).std(ddof=1).shift(1)
+
+
+def ewma_volatility_baseline(
+    returns_pct: pd.Series, decay: float = 0.94
+) -> pd.Series:
+    """Baseline RiskMetrics: ``s2_t = d * s2_{t-1} + (1 - d) * r2_{t-1}``.
+
+    Es el baseline ingenuo estándar en riesgo de mercado y es más difícil
+    de batir que la desviación móvil de 20 días. ``ewm(adjust=False)``
+    implementa la recursión; ``shift(1)`` garantiza que el valor en ``t``
+    solo use retornos hasta ``t-1``.
+
+    Raises
+    ------
+    ValueError
+        Si ``decay`` no está en ``(0, 1)``.
+    """
+    if not 0.0 < decay < 1.0:
+        raise ValueError(f"decay debe estar en (0, 1), se recibió {decay}.")
+    variance = (returns_pct**2).ewm(alpha=1.0 - decay, adjust=False).mean()
+    return np.sqrt(variance).shift(1)

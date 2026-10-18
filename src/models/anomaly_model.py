@@ -11,6 +11,7 @@ precisamente, el mecanismo de "reentrenamiento" de este modelo.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -20,6 +21,7 @@ import pandas as pd
 
 from src.exceptions import InsufficientHistoryError, ModelFitError
 from src.features.returns import compute_causal_zscore_bands
+from src.features.seasonality import HOURS, deseasonalize, hourly_profile
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,10 @@ class AnomalyDetector:
         Marca de tiempo UTC del entrenamiento.
     train_rows:
         Barras usadas para calibrar (tamaño de muestra).
+    seasonal_profile:
+        Factor de volatilidad por hora UTC estimado en entrenamiento; el
+        z-score se calcula sobre el retorno dividido por el factor de su
+        hora. Todos 1.0 equivale al detector sin ajuste estacional.
     """
 
     version: str
@@ -51,6 +57,26 @@ class AnomalyDetector:
     reversion_horizon_bars: int
     trained_at: datetime
     train_rows: int
+    seasonal_profile: tuple[float, ...] = (1.0,) * len(HOURS)
+
+    def _bands(
+        self, log_return: pd.Series, min_bars_required: int
+    ) -> pd.DataFrame:
+        """Bandas causales sobre el retorno desestacionalizado.
+
+        ``log_return`` conserva el retorno crudo (la etiqueta de reversión
+        se define sobre él); ``rolling_mean``, ``rolling_std`` y ``zscore``
+        están en unidades desestacionalizadas.
+        """
+        profile = pd.Series(self.seasonal_profile, index=HOURS)
+        bands = compute_causal_zscore_bands(
+            deseasonalize(log_return, profile),
+            self.rolling_window,
+            min_bars_required,
+        )
+        bands["seasonal_factor"] = profile.reindex(bands.index.hour).to_numpy()
+        bands["log_return"] = log_return.reindex(bands.index)
+        return bands
 
     @classmethod
     def fit(
@@ -61,6 +87,7 @@ class AnomalyDetector:
         reversion_horizon_bars: int,
         min_bars_required: int,
         version: str | None = None,
+        seasonal: bool = True,
     ) -> AnomalyDetector:
         """Calibra el umbral de z-score sobre un historial de retornos.
 
@@ -81,6 +108,9 @@ class AnomalyDetector:
         version:
             Identificador de versión; si es ``None`` se usa el timestamp
             actual en UTC.
+        seasonal:
+            Si es ``True`` (por defecto) estima el perfil horario con estos
+            mismos datos de entrenamiento y lo aplica antes del z-score.
 
         Returns
         -------
@@ -100,9 +130,23 @@ class AnomalyDetector:
                 f"{target_anomaly_rate}."
             )
 
-        bands = compute_causal_zscore_bands(
-            log_return, rolling_window, min_bars_required
+        profile = (
+            tuple(float(f) for f in hourly_profile(log_return))
+            if seasonal
+            else (1.0,) * len(HOURS)
         )
+        trained_at = datetime.now(UTC)
+        unfitted = cls(
+            version=version or trained_at.strftime("%Y%m%dT%H%M%S%fZ"),
+            rolling_window=rolling_window,
+            zscore_threshold=float("inf"),
+            target_anomaly_rate=target_anomaly_rate,
+            reversion_horizon_bars=reversion_horizon_bars,
+            trained_at=trained_at,
+            train_rows=0,
+            seasonal_profile=profile,
+        )
+        bands = unfitted._bands(log_return, min_bars_required)
         abs_z = bands["zscore"].abs()
 
         threshold = float(
@@ -113,15 +157,8 @@ class AnomalyDetector:
                 f"El umbral calibrado no es válido: {threshold}."
             )
 
-        trained_at = datetime.now(UTC)
-        return cls(
-            version=version or trained_at.strftime("%Y%m%dT%H%M%S%fZ"),
-            rolling_window=rolling_window,
-            zscore_threshold=threshold,
-            target_anomaly_rate=target_anomaly_rate,
-            reversion_horizon_bars=reversion_horizon_bars,
-            trained_at=trained_at,
-            train_rows=len(bands),
+        return dataclasses.replace(
+            unfitted, zscore_threshold=threshold, train_rows=len(bands)
         )
 
     def predict(
@@ -139,12 +176,11 @@ class AnomalyDetector:
         Returns
         -------
         pandas.DataFrame
-            Columnas ``log_return``, ``rolling_mean``, ``rolling_std``,
-            ``zscore``, ``is_anomaly``.
+            Columnas ``log_return`` (crudo), ``rolling_mean``,
+            ``rolling_std``, ``zscore`` (desestacionalizados),
+            ``seasonal_factor`` e ``is_anomaly``.
         """
-        bands = compute_causal_zscore_bands(
-            log_return, self.rolling_window, min_bars_required
-        )
+        bands = self._bands(log_return, min_bars_required)
         bands["is_anomaly"] = bands["zscore"].abs() > self.zscore_threshold
         return bands
 
@@ -158,6 +194,7 @@ class AnomalyDetector:
             "reversion_horizon_bars": self.reversion_horizon_bars,
             "trained_at": self.trained_at.isoformat(),
             "train_rows": self.train_rows,
+            "seasonal_profile": list(self.seasonal_profile),
         }
 
     @classmethod
@@ -171,6 +208,11 @@ class AnomalyDetector:
             reversion_horizon_bars=int(metadata["reversion_horizon_bars"]),
             trained_at=datetime.fromisoformat(metadata["trained_at"]),
             train_rows=int(metadata["train_rows"]),
+            # Los detectores previos al ajuste estacional no lo tienen.
+            seasonal_profile=tuple(
+                float(f)
+                for f in metadata.get("seasonal_profile", [1.0] * len(HOURS))
+            ),
         )
 
 
@@ -197,8 +239,9 @@ def label_reversion_outcomes(
     Returns
     -------
     pandas.DataFrame
-        Copia de ``bands`` con una columna adicional ``reverted`` (``bool``,
-        ``NaN``/fila eliminada si no hay suficientes barras futuras).
+        Copia de ``bands`` con una columna adicional ``reverted`` (``bool``).
+        Se eliminan las filas sin suficientes barras futuras y los empates
+        (retorno actual o futuro acumulado exactamente 0).
 
     Raises
     ------
@@ -218,6 +261,13 @@ def label_reversion_outcomes(
     labeled = bands.copy()
     labeled["future_cum_return"] = future_cum_return
     labeled = labeled.dropna(subset=["future_cum_return"])
+    # Empates: con retorno 0 (o retorno futuro 0) el signo no está definido.
+    # Contarlos como "reversión" inflaba la prevalencia (EUR/USD: 34% de
+    # las barras de 5 min tienen retorno 0) y con ella al baseline aleatorio.
+    is_tie = (labeled["log_return"] == 0.0) | (
+        labeled["future_cum_return"] == 0.0
+    )
+    labeled = labeled[~is_tie]
 
     if labeled.empty:
         raise InsufficientHistoryError(

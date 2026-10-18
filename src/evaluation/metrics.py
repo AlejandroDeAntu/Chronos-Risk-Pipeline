@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import statsmodels.api as sm
 from scipy import stats
 from sklearn.metrics import (
     confusion_matrix,
@@ -29,6 +30,8 @@ from sklearn.metrics import (
 )
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.stats.proportion import proportion_confint
+
+from src.exceptions import InsufficientHistoryError
 
 _MIN_RELIABLE_SAMPLE = 30
 _LJUNG_BOX_LAG = 10
@@ -253,4 +256,124 @@ def evaluate_volatility_forecast(
             stats.kurtosis(standardized, fisher=True)
         ),
         sample_size_warning=_sample_size_warning(len(predicted)),
+    )
+
+
+@dataclass(frozen=True)
+class PrecisionLiftResult:
+    """Precisión del detector contra la prevalencia de la clase positiva.
+
+    La precisión esperada de un baseline aleatorio, con cualquier tasa de
+    marcado, es exactamente la prevalencia. Comparar contra ella sustituye
+    al F1 de una sola tirada aleatoria, cuya varianza es enorme.
+    """
+
+    precision: float
+    prevalence: float
+    lift: float
+    p_value: float
+    n_predicted_positive: int
+
+
+def precision_lift_test(report: ClassificationReport) -> PrecisionLiftResult:
+    """Test binomial exacto de una cola (H1: precisión > prevalencia).
+
+    Parameters
+    ----------
+    report:
+        Reporte con la matriz de confusión del detector.
+
+    Returns
+    -------
+    PrecisionLiftResult
+        Precisión, prevalencia, lift (precisión / prevalencia) y p-valor.
+
+    Raises
+    ------
+    ValueError
+        Si no hay positivos predichos o la prevalencia es 0 o 1.
+    """
+    (_, _), (fn, tp) = report.confusion_matrix
+    k = report.n_predicted_positive
+    prevalence = (fn + tp) / report.n_samples
+    if k == 0 or not 0.0 < prevalence < 1.0:
+        raise ValueError(
+            f"Test indefinido: k={k}, prevalencia={prevalence:.3f}."
+        )
+    result = stats.binomtest(tp, k, prevalence, alternative="greater")
+    precision = tp / k
+    return PrecisionLiftResult(
+        precision=precision,
+        prevalence=prevalence,
+        lift=precision / prevalence,
+        p_value=float(result.pvalue),
+        n_predicted_positive=k,
+    )
+
+
+@dataclass(frozen=True)
+class DieboldMarianoResult:
+    """Diferencial de pérdida ``d = modelo - referencia`` (< 0 = mejor)."""
+
+    mean_loss_diff: float
+    t_stat: float
+    p_value_one_sided: float
+    n_samples: int
+
+
+def diebold_mariano(
+    model_loss: np.ndarray, reference_loss: np.ndarray
+) -> DieboldMarianoResult:
+    """Test de Diebold-Mariano con error estándar HAC (Newey-West).
+
+    H1 (una cola): la pérdida media del modelo es menor que la de la
+    referencia. Rezago HAC: ``ceil(n^(1/3))``; estadístico con la
+    corrección de Harvey-Leybourne-Newbold y p-valor de una t(n-1).
+
+    Parameters
+    ----------
+    model_loss:
+        Pérdida punto a punto del modelo (p. ej. QLIKE).
+    reference_loss:
+        Pérdida de la referencia sobre las mismas observaciones.
+
+    Returns
+    -------
+    DieboldMarianoResult
+        Diferencia media, estadístico t y p-valor de una cola.
+
+    Raises
+    ------
+    ValueError
+        Si las longitudes difieren.
+    InsufficientHistoryError
+        Si hay menos de 30 observaciones.
+    """
+    model = np.asarray(model_loss, dtype=float)
+    reference = np.asarray(reference_loss, dtype=float)
+    if len(model) != len(reference):
+        raise ValueError("Las pérdidas deben tener la misma longitud.")
+    n_obs = len(model)
+    if n_obs < _MIN_RELIABLE_SAMPLE:
+        raise InsufficientHistoryError(
+            f"Diebold-Mariano requiere >= {_MIN_RELIABLE_SAMPLE} puntos, "
+            f"se recibieron {n_obs}."
+        )
+    diff = model - reference
+    if np.allclose(diff, diff[0]):
+        # Diferencial constante: sin varianza, el signo decide.
+        t_stat = 0.0 if diff[0] == 0.0 else float(np.copysign(np.inf, diff[0]))
+    else:
+        max_lag = int(np.ceil(n_obs ** (1.0 / 3.0)))
+        fit = sm.OLS(diff, np.ones_like(diff)).fit(
+            cov_type="HAC", cov_kwds={"maxlags": max_lag}
+        )
+        # Corrección de muestra pequeña de Harvey, Leybourne y Newbold
+        # (1997) para pronósticos a un paso, con referencia t(n-1).
+        t_stat = float(fit.tvalues[0]) * np.sqrt((n_obs - 1) / n_obs)
+    return DieboldMarianoResult(
+        mean_loss_diff=float(diff.mean()),
+        t_stat=t_stat,
+        p_value_one_sided=float(stats.t.cdf(t_stat, df=n_obs - 1)),
+        n_samples=n_obs,
     )

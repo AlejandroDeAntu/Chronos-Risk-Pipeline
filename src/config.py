@@ -12,7 +12,8 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, Field, field_validator
+import pandas as pd
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -22,6 +23,16 @@ class AssetClass(StrEnum):
 
     EQUITY_INDEX = "equity_index"
     FX = "fx"
+
+
+# Desde la medianoche UTC de la fecha de la vela diaria hasta que su cierre
+# es definitivo. Índices US: cierre 20:00/21:00 UTC (EDT/EST) + margen.
+# FX: 0, porque align_fx_daily cierra el día D con el open de la vela D+1
+# (fijo en cuanto abre) y descarta la vela en curso.
+DAILY_BAR_FINAL_AFTER: dict[AssetClass, pd.Timedelta] = {
+    AssetClass.EQUITY_INDEX: pd.Timedelta(hours=21, minutes=15),
+    AssetClass.FX: pd.Timedelta(0),
+}
 
 
 class AssetConfig(BaseModel):
@@ -80,6 +91,10 @@ class AnomalyDetectorConfig(BaseModel):
         description="Yahoo Finance limita las velas de 5m a 60 días.",
     )
     min_bars_required: int = Field(default=60, ge=20)
+    seasonal_adjustment: bool = Field(
+        default=True,
+        description="Desestacionalizar por hora UTC antes del z-score.",
+    )
 
     @property
     def interval(self) -> str:
@@ -87,8 +102,16 @@ class AnomalyDetectorConfig(BaseModel):
         return f"{self.bar_minutes}m"
 
 
+VOLATILITY_FAMILIES: tuple[str, ...] = ("garch", "gjr", "egarch", "har")
+
+
 class GarchModelConfig(BaseModel):
-    """Hiperparámetros del modelo GARCH(1,1)-t de volatilidad diaria."""
+    """Modelos de volatilidad diaria (la sección conserva su nombre histórico).
+
+    ``candidate_families`` compiten en walk-forward; el campeón de cada
+    activo solo cambia si un retador gana con Diebold-Mariano significativo
+    tras el ajuste de Holm.
+    """
 
     model_config = {"frozen": True}
 
@@ -101,6 +124,24 @@ class GarchModelConfig(BaseModel):
         ge=5,
         description="Ventana del baseline de volatilidad histórica móvil.",
     )
+    candidate_families: tuple[str, ...] = Field(
+        default=("garch", "gjr", "egarch", "har"), min_length=1
+    )
+    default_family: str = Field(
+        default="garch",
+        description="Familia del arranque en frío, antes de la selección.",
+    )
+
+    @model_validator(mode="after")
+    def _known_families(self) -> GarchModelConfig:
+        unknown = set(self.candidate_families) - set(VOLATILITY_FAMILIES)
+        if unknown:
+            raise ValueError(f"Familias desconocidas: {sorted(unknown)}.")
+        if self.default_family not in self.candidate_families:
+            raise ValueError(
+                "default_family debe estar en candidate_families."
+            )
+        return self
 
 
 class RetrainTriggerConfig(BaseModel):
@@ -150,7 +191,43 @@ class RetrainTriggerConfig(BaseModel):
         ),
     )
     walk_forward_splits: int = Field(default=4, ge=2)
+    promotion_alpha: float = Field(
+        default=0.05,
+        gt=0.0,
+        lt=0.5,
+        description=(
+            "Significancia (una cola) para promover un candidato: binomial "
+            "de precisión vs prevalencia (anomalías) o Diebold-Mariano vs "
+            "baseline (GARCH)."
+        ),
+    )
     drift_detection_enabled: bool = Field(default=True)
+
+
+class DataQualityConfig(BaseModel):
+    """Umbrales de calidad de la fuente de datos."""
+
+    model_config = {"frozen": True}
+
+    max_ohlc_repair_share: float = Field(
+        default=0.10,
+        ge=0.0,
+        lt=1.0,
+        description=(
+            "Proporción máxima de velas OHLC inconsistentes que se reparan "
+            "antes de rechazar la descarga. Yahoo FX 2010-2026: hasta 5.8% "
+            "(USD/JPY); 10% deja margen y detecta una fuente corrupta."
+        ),
+    )
+    max_zero_return_share: float = Field(
+        default=0.20,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "Proporción de retornos cero a partir de la cual se advierte "
+            "de cotizaciones rancias."
+        ),
+    )
 
 
 class PathsConfig(BaseModel):
@@ -185,6 +262,7 @@ class PipelineSettings(BaseModel):
     garch: GarchModelConfig = Field(default_factory=GarchModelConfig)
     retrain: RetrainTriggerConfig = Field(default_factory=RetrainTriggerConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
+    data_quality: DataQualityConfig = Field(default_factory=DataQualityConfig)
 
     @field_validator("assets")
     @classmethod

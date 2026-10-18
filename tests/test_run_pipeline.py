@@ -54,15 +54,18 @@ def test_data_failure_is_reported_and_exit_code_is_one(
 
 
 @pytest.mark.usefixtures("mock_yfinance")
-def test_backtest_writes_report_and_does_not_touch_database(
-    patched_settings: PipelineSettings,
+@pytest.mark.parametrize("mode", ["report", "backtest"])
+def test_report_mode_writes_html_pdf_and_figures_without_touching_db(
+    patched_settings: PipelineSettings, mode: str
 ) -> None:
-    assert run_pipeline.main(["--mode", "backtest"]) == 0
+    assert run_pipeline.main(["--mode", mode]) == 0
 
-    reports = list(patched_settings.paths.reports_dir.glob("*/backtest.md"))
-    assert len(reports) == 1
-    text = reports[0].read_text(encoding="utf-8")
-    assert "| Test Index |" in text
-    assert "QLIKE" in text
-    assert list(reports[0].parent.glob("qq_*.png"))
+    [directory] = list(patched_settings.paths.reports_dir.glob("report_*"))
+    html = (directory / "report.html").read_text(encoding="utf-8")
+    assert "Test Index" in html
+    assert "Resumen ejecutivo" in html
+    # Autocontenido: ninguna referencia a recursos externos.
+    assert "http://" not in html and "https://" not in html
+    assert (directory / "report.pdf").read_bytes().startswith(b"%PDF")
+    assert len(list((directory / "figures").glob("*.png"))) >= 5
     assert not patched_settings.paths.database_path.exists()
