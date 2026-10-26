@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS predictions (
     horizon_bars INTEGER NOT NULL,
     payload_json TEXT NOT NULL,
     -- 0 = pendiente, 1 = evaluada, 2 = superada (no evaluable: se
-    -- generó con una convención de datos que ya no aplica).
+    -- generó con una convención de datos que ya no aplica, o es una
+    -- anomalía sobre un empate / fuera de la ventana descargada).
     evaluated INTEGER NOT NULL DEFAULT 0,
     UNIQUE(asset_symbol, signal_type, reference_timestamp)
 );

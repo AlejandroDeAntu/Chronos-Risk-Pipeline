@@ -69,11 +69,20 @@ def _close_anomaly_outcomes(
     except InsufficientHistoryError:
         return 0
 
-    closed = 0
+    horizon = settings.anomaly.reversion_horizon_bars
+    closed = superseded = 0
     for row in pending:
         reference = pd.Timestamp(row["reference_timestamp"])
         if reference not in labeled.index:
-            continue  # Horizonte aún incompleto o fuera de la ventana.
+            # Empate o barra fuera de la ventana: nunca tendrá etiqueta.
+            # Si su horizonte ya pasó se retira de la cola (sin métrica);
+            # si no, sigue pendiente hasta que se observe.
+            if _never_labelable(reference, log_return.index, horizon):
+                database.supersede_prediction(
+                    settings.paths.database_path, row["id"]
+                )
+                superseded += 1
+            continue
         reverted = bool(labeled.loc[reference, "reverted"])
         is_anomaly = bool(json.loads(row["payload_json"])["is_anomaly"])
         baseline_flag = bool(
@@ -91,7 +100,28 @@ def _close_anomaly_outcomes(
             evaluated_at=now,
         )
         closed += 1
+    if superseded:
+        logger.info(
+            "%d predicciones de anomalía sin etiqueta posible (empates o "
+            "fuera de la ventana) retiradas de la cola.",
+            superseded,
+        )
     return closed
+
+
+def _never_labelable(
+    reference: pd.Timestamp, index: pd.DatetimeIndex, horizon: int
+) -> bool:
+    """La barra ya no podrá etiquetarse.
+
+    Salió de la ventana descargada, o sus ``horizon`` barras futuras ya se
+    observaron sin producir etiqueta (empate o hueco en los datos).
+    """
+    if index.empty:
+        return False
+    if reference < index[0]:
+        return True
+    return index.searchsorted(reference) + horizon < len(index)
 
 
 def _record_anomaly_run(
