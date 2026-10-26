@@ -31,6 +31,8 @@ from src.reporting.style import (
     INK_SECONDARY,
     format_p,
 )
+from src.reporting.weekly import WeeklySummary
+from src.reporting.weekly_render import draw_weekly_pages
 
 A4_LANDSCAPE = (11.69, 8.27)
 _WRAP = 150
@@ -235,9 +237,16 @@ def _limitations_page(data: ReportData, number: int) -> Figure:
     return figure
 
 
-def render_pdf(data: ReportData, path: Path) -> Path:
+def render_pdf(
+    data: ReportData, path: Path, weekly: WeeklySummary | None = None
+) -> Path:
     """Escribe el PDF ejecutivo; devuelve la ruta."""
     pages = [_cover(data)]
+    if weekly is not None:
+        base = len(pages) + 1
+        pages += draw_weekly_pages(
+            weekly, lambda title, i: _page(title, data, base + i)
+        )
     pages += [
         _asset_page(a, data, len(pages) + i + 1)
         for i, a in enumerate(a for a in data.assets if a.volatility)

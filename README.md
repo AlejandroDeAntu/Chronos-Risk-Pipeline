@@ -92,7 +92,7 @@ API key: `yfinance` es pública.
 python -m venv .venv
 .venv\Scripts\activate                 # Windows (macOS/Linux: source .venv/bin/activate)
 pip install -r requirements-dev.lock   # versiones fijadas (las de CI)
-pytest -q                              # 156 pruebas, sin red
+pytest -q                              # 166 pruebas, sin red
 python run_pipeline.py                 # ciclo completo, todos los activos
 python run_pipeline.py --mode report   # reporte HTML + PDF + PNG -> reports/
 ```
@@ -183,7 +183,21 @@ estos resultados y corrigió cinco defectos de medición:
   `data/pipeline.db`. GitHub envía un correo si el job falla.
 - `.github/workflows/report.yml`: cada lunes a las 01:00 UTC (y a mano con
   `workflow_dispatch`) genera el reporte y lo publica como artefacto de la
-  corrida.
+  corrida, con un **resumen semanal** al inicio que también se muestra en la
+  página del run y se versiona en [`docs/semanal/`](docs/semanal/):
+  - campeón por activo y su mejora frente al GARCH(1,1)-t original y a
+    EWMA, y el cambio contra la semana anterior;
+  - operación en vivo de los últimos 7 días contra los 7 anteriores
+    (ciclos del cron, resultados evaluados, pérdida en vivo contra el
+    baseline, precisión de anomalías, modelos entrenados y promovidos,
+    backlog sin evaluar, tamaño de la base);
+  - avance del código según git (commits, líneas, funciones de prueba);
+  - alertas automáticas (cambio de campeón, VaR rechazado o agrupado,
+    cotizaciones rancias, cron incompleto, base cerca del límite de
+    GitHub).
+
+  La foto de métricas de cada semana se agrega a
+  `data/weekly_snapshots.jsonl`; el lunes siguiente se compara contra ella.
 - `.github/workflows/ci.yml`: en cada push, Ruff (PEP8 a 79 columnas, type
   hints, docstrings, sin `except` genérico) y pytest.
 
@@ -255,7 +269,7 @@ run_pipeline.py              punto de entrada único
 src/                         código de producción (config, data, features,
                              models, persistence, evaluation, pipeline,
                              reporting, notifications)
-tests/                       156 pruebas pytest (contratos OHLC, fuga,
+tests/                       166 pruebas pytest (contratos OHLC, fuga,
                              estimadores, modelos, selección, VaR,
                              reporte, integración, entry point)
 data/pipeline.db             historial auditable (lo crea el pipeline)

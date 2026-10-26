@@ -242,6 +242,11 @@ class PathsConfig(BaseModel):
 
     database_path: Path = Field(default=_PROJECT_ROOT / "data" / "pipeline.db")
     reports_dir: Path = Field(default=_PROJECT_ROOT / "reports")
+    # Una línea JSON por semana; la agrega el workflow del reporte semanal.
+    weekly_history_path: Path = Field(
+        default=_PROJECT_ROOT / "data" / "weekly_snapshots.jsonl"
+    )
+    project_root: Path = Field(default=_PROJECT_ROOT)
 
     @field_validator("database_path")
     @classmethod

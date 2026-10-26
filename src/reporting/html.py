@@ -14,6 +14,8 @@ from string import Template
 from src.reporting.data import AssetSection, ReportData
 from src.reporting.figures import TRACKING_DAYS, VAR_DAYS
 from src.reporting.style import FAMILY_LABELS, format_p, format_price
+from src.reporting.weekly import WeeklySummary
+from src.reporting.weekly_render import render_html_section
 
 _CSS = """
 :root { --ink:#0b0b0b; --ink2:#52514e; --muted:#898781; --grid:#e1e0d9;
@@ -73,6 +75,7 @@ _PAGE = Template(
 <h1>Reporte de volatilidad y riesgo</h1>
 <p class="meta">Generado $generated · Fuente: $source · $window</p>
 </header>
+$weekly
 <section>
 <h2>Resumen ejecutivo</h2>
 <ol class="findings">$findings</ol>
@@ -363,6 +366,7 @@ def render_html(
     asset_figures: dict[str, dict[str, Path]],
     summary_figures: dict[str, Path],
     path: Path,
+    weekly: WeeklySummary | None = None,
 ) -> Path:
     """Escribe el reporte HTML autocontenido.
 
@@ -377,6 +381,8 @@ def render_html(
         PNG de resumen (``lift``, ``profiles``).
     path:
         Ruta del HTML a escribir.
+    weekly:
+        Resumen semanal; si se omite, no se incluye la sección.
 
     Returns
     -------
@@ -393,6 +399,7 @@ def render_html(
     errors = [f"{a.name}: {e}" for a in data.assets for e in a.errors]
     page = _PAGE.substitute(
         css=_CSS,
+        weekly="" if weekly is None else render_html_section(weekly),
         generated=escape(f"{data.generated_at:%Y-%m-%d %H:%M} UTC"),
         source="Yahoo Finance vía yfinance",
         window=escape(window),

@@ -393,6 +393,75 @@ def fetch_latest_evaluation_runs(db_path: Path) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def fetch_weekly_activity(
+    db_path: Path, start: datetime, end: datetime
+) -> dict[str, Any]:
+    """Actividad del pipeline en ``[start, end)`` para el resumen semanal.
+
+    Ciclos = ``run_ts`` distintos con predicciones nuevas; las pérdidas en
+    vivo salen de los resultados evaluados dentro de la ventana. Las medias
+    son ``None`` si la ventana no tiene resultados de esa señal.
+    """
+    bounds = (start.isoformat(), end.isoformat())
+    with _connect(db_path) as conn:
+        produced = conn.execute(
+            """
+            SELECT signal_type, COUNT(DISTINCT run_ts) AS cycles,
+                   COUNT(*) AS n
+            FROM predictions WHERE run_ts >= ? AND run_ts < ?
+            GROUP BY signal_type
+            """,
+            bounds,
+        ).fetchall()
+        live = conn.execute(
+            """
+            SELECT COUNT(*) AS outcomes,
+              AVG(CASE WHEN p.signal_type = 'garch_volatility_forecast'
+                  THEN o.error_metric END) AS vol_model_loss,
+              AVG(CASE WHEN p.signal_type = 'garch_volatility_forecast'
+                  THEN o.baseline_error_metric END) AS vol_baseline_loss,
+              AVG(CASE WHEN p.signal_type = 'garch_volatility_forecast'
+                  THEN o.error_metric < o.baseline_error_metric END)
+                  AS vol_win_share,
+              AVG(CASE WHEN p.signal_type = 'anomaly'
+                  AND json_extract(p.payload_json, '$.is_anomaly')
+                  THEN o.realized_value END) AS anomaly_precision,
+              AVG(CASE WHEN p.signal_type = 'anomaly'
+                  THEN o.realized_value END) AS anomaly_prevalence
+            FROM outcomes o JOIN predictions p ON p.id = o.prediction_id
+            WHERE o.evaluated_at >= ? AND o.evaluated_at < ?
+            """,
+            bounds,
+        ).fetchone()
+        models = conn.execute(
+            """
+            SELECT COUNT(*) AS registered,
+                   COALESCE(SUM(stage IN ('active', 'retired')), 0)
+                       AS promoted
+            FROM model_registry WHERE created_at >= ? AND created_at < ?
+            """,
+            bounds,
+        ).fetchone()
+    return {
+        "cycles": {r["signal_type"]: r["cycles"] for r in produced},
+        "predictions": {r["signal_type"]: r["n"] for r in produced},
+        **dict(live),
+        "models_registered": models["registered"],
+        "models_promoted": models["promoted"],
+    }
+
+
+def count_stale_pending(db_path: Path, before: datetime) -> int:
+    """Predicciones aún sin evaluar registradas antes de ``before``."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM predictions WHERE evaluated = 0 "
+            "AND run_ts < ?",
+            (before.isoformat(),),
+        ).fetchone()
+    return int(row[0])
+
+
 def insert_model_version(
     db_path: Path,
     asset_symbol: str,

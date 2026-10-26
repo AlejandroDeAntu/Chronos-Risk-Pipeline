@@ -26,6 +26,8 @@ from src.reporting.figures import (
 )
 from src.reporting.html import render_html
 from src.reporting.pdf import render_pdf
+from src.reporting.weekly import build_weekly_summary, snapshot_line
+from src.reporting.weekly_render import render_markdown
 
 _WIDE, _SQUARE = (9.0, 3.6), (5.4, 4.2)
 
@@ -37,6 +39,8 @@ class ReportPaths:
     directory: Path
     html: Path
     pdf: Path
+    weekly: Path
+    snapshot: Path
     figures: tuple[Path, ...]
 
 
@@ -50,6 +54,9 @@ def write_report(
     generated_at: datetime,
 ) -> ReportPaths:
     """Genera ``reports/report_<UTC>/`` con HTML, PDF y PNG a 200 dpi.
+
+    Incluye el resumen semanal (``weekly.md``) y su foto en una línea
+    JSON (``snapshot.json``), que el workflow semanal agrega al historial.
 
     Parameters
     ----------
@@ -111,7 +118,26 @@ def write_report(
         summary["profiles"] = figures_dir / "hourly_profiles.png"
         figure.savefig(summary["profiles"], dpi=PNG_DPI, facecolor="white")
 
-    html = render_html(data, asset_figures, summary, out / "report.html")
-    pdf = render_pdf(data, out / "report.pdf")
+    weekly = build_weekly_summary(
+        data,
+        settings.paths.weekly_history_path,
+        settings.paths.database_path,
+        settings.paths.project_root,
+    )
+    weekly_md = out / "weekly.md"
+    weekly_md.write_text(render_markdown(weekly), encoding="utf-8")
+    snapshot = out / "snapshot.json"
+    snapshot.write_text(snapshot_line(weekly) + "\n", encoding="utf-8")
+    html = render_html(
+        data, asset_figures, summary, out / "report.html", weekly
+    )
+    pdf = render_pdf(data, out / "report.pdf", weekly)
     figures = tuple(sorted(figures_dir.glob("*.png")))
-    return ReportPaths(directory=out, html=html, pdf=pdf, figures=figures)
+    return ReportPaths(
+        directory=out,
+        html=html,
+        pdf=pdf,
+        weekly=weekly_md,
+        snapshot=snapshot,
+        figures=figures,
+    )

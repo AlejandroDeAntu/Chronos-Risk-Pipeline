@@ -55,5 +55,6 @@ def make_settings(
     paths = PathsConfig(
         database_path=tmp_path / "data" / "pipeline.db",
         reports_dir=tmp_path / "reports",
+        weekly_history_path=tmp_path / "data" / "weekly.jsonl",
     )
     return PipelineSettings(assets=(asset,), paths=paths, retrain=retrain)

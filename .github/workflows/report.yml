@@ -1,8 +1,11 @@
 name: Reporte semanal
 
-# Genera el reporte de volatilidad y riesgo (HTML autocontenido, PDF y PNG)
-# con datos frescos y lo publica como artifact descargable del run. No se
-# commitea: los reportes son derivados y reproducibles con el mismo comando.
+# Cada lunes genera el reporte de volatilidad y riesgo (HTML autocontenido,
+# PDF y PNG) con datos frescos y lo publica como artifact del run. Además:
+# - muestra el resumen semanal (weekly.md) en la página del run;
+# - versiona ese resumen en docs/semanal/ para leerlo directo en GitHub;
+# - agrega la foto de métricas de la semana a data/weekly_snapshots.jsonl,
+#   que el reporte del lunes siguiente usa para comparar semana a semana.
 
 on:
   schedule:
@@ -10,15 +13,23 @@ on:
     - cron: "0 1 * * 1"
   workflow_dispatch:
 
+# Comparte grupo con pipeline.yml: ambos hacen commit en main.
+concurrency:
+  group: pipeline-db
+  cancel-in-progress: false
+
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   report:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # Historial completo: el avance del proyecto se mide con git log.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -41,3 +52,22 @@ jobs:
           path: reports/report_*/
           retention-days: 90
           if-no-files-found: error
+
+      - name: Resumen en la página del run
+        if: ${{ !cancelled() }}
+        run: cat reports/report_*/weekly.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Versionar resumen y foto semanal
+        if: ${{ !cancelled() }}
+        run: |
+          day=$(date -u +%Y-%m-%d)
+          mkdir -p docs/semanal
+          cp reports/report_*/weekly.md "docs/semanal/$day.md"
+          cat reports/report_*/snapshot.json >> data/weekly_snapshots.jsonl
+          git config user.name "trading-pipeline-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add "docs/semanal/$day.md" data/weekly_snapshots.jsonl
+          git diff --cached --quiet && exit 0
+          git commit -m "docs: resumen semanal $day"
+          git pull --rebase --autostash
+          git push
