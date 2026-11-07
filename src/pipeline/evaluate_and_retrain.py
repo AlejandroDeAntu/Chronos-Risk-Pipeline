@@ -265,7 +265,12 @@ def _record_garch_run(
     rv_day = np.array(
         [np.nan if t is None else frame["rv_day"].iloc[t] for t in targets]
     )
-    valid = np.isfinite(rv_day) & (rv_day > 0.0)
+    valid = (
+        np.isfinite(rv_day)
+        & (rv_day > 0.0)
+        & np.isfinite(baseline)
+        & (baseline > 0.0)
+    )
     rv_extra = (
         {
             "qlike_rv_day": float(

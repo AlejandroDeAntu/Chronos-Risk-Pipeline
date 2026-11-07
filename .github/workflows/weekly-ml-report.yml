@@ -40,6 +40,7 @@ jobs:
         run: echo "path=$(python -m src.reporting.weekly_ml)" >> "$GITHUB_OUTPUT"
 
       - name: Versionar el reporte
+        id: commit
         env:
           REPORT: ${{ steps.report.outputs.path }}
         run: |
@@ -50,10 +51,15 @@ jobs:
           git commit -m "docs: reporte semanal del modelo $(basename "$REPORT" .md)"
           git pull --rebase --autostash
           git push
+          echo "committed=true" >> "$GITHUB_OUTPUT"
 
+      # Solo si hubo reporte nuevo: relanzar el mismo día no duplica el Issue.
       - name: Abrir Issue con el resumen
+        if: ${{ steps.commit.outputs.committed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPORT: ${{ steps.report.outputs.path }}
-        run: |
-          gh issue create             --title "Reporte semanal del modelo $(basename "$REPORT" .md)"             --body-file "$REPORT"
+        run: >-
+          gh issue create
+          --title "Reporte semanal del modelo $(basename "$REPORT" .md)"
+          --body-file "$REPORT"
