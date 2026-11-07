@@ -304,6 +304,9 @@ def retrain_volatility_model(
     3. Piso de calidad: el campeón debe superar al baseline SD-20d con
        Diebold-Mariano (``promotion_alpha``); si no, se registra como
        candidato y el modelo activo sigue sirviendo.
+    4. Contra EWMA (el baseline en vivo) solo se marca ``beats_ewma``: no
+       bloquea la promoción, porque en el backtest el campeón tiene menor
+       QLIKE medio que EWMA aun cuando la diferencia no es significativa.
 
     Parameters
     ----------
@@ -336,6 +339,10 @@ def retrain_volatility_model(
     common = walk_forward.common_mask
     dm = diebold_mariano(champion_loss[common], baseline_loss[common])
     promote = force_promote or dm.p_value_one_sided < alpha
+    dm_ewma = diebold_mariano(
+        champion_loss[common], walk_forward.qlike("ewma")[common]
+    )
+    beats_ewma = bool(dm_ewma.p_value_one_sided < alpha)
 
     candidate = fit_volatility_model(
         frame, champion.champion, settings.garch.min_history_days
@@ -352,6 +359,8 @@ def retrain_volatility_model(
         "n_common_days": int(walk_forward.common_mask.sum()),
         "reproducibility": _fingerprint(frame),
         "diebold_mariano_vs_sd20": asdict(dm),
+        "diebold_mariano_vs_ewma": asdict(dm_ewma),
+        "beats_ewma": beats_ewma,
         "promoted": promote,
         **_trigger_metrics(decision),
     }
@@ -365,7 +374,9 @@ def retrain_volatility_model(
     )
     reason = (
         f"{champion.reason} Campeón '{champion.champion}' vs SD-20d: DM "
-        f"t={dm.t_stat:.2f} (p={dm.p_value_one_sided:.4f})"
+        f"t={dm.t_stat:.2f} (p={dm.p_value_one_sided:.4f}); vs EWMA: "
+        f"p={dm_ewma.p_value_one_sided:.4f}"
+        f"{'' if beats_ewma else ' (no lo supera)'}"
     )
     if promote:
         logger.info("Volatilidad de '%s' promovida: %s.", asset.symbol, reason)

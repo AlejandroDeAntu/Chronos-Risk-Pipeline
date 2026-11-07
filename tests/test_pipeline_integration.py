@@ -251,6 +251,11 @@ def test_fixed_cadence_forces_garch_retrain(
     assert metrics["champion_decision"]["previous"] == "garch"
     assert {"sd20", "ewma"} <= set(metrics["mean_qlike"])
     assert "p_value_one_sided" in metrics["diebold_mariano_vs_sd20"]
+    # B2: EWMA no bloquea la promoción; solo marca si el campeón le gana.
+    dm_ewma = metrics["diebold_mariano_vs_ewma"]
+    assert metrics["beats_ewma"] is (
+        dm_ewma["p_value_one_sided"] < settings.retrain.promotion_alpha
+    )
     assert metrics["triggered_by"] == "fixed_cadence"
 
 

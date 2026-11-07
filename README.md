@@ -72,6 +72,10 @@ disparó (`triggered_by`).
 Un candidato solo reemplaza al modelo activo si supera al baseline en una
 validación walk-forward (`TimeSeriesSplit`, nunca split aleatorio; con
 `gap` igual al horizonte de la etiqueta en anomalías).
+En volatilidad ese piso es SD-20d; contra EWMA solo se marca
+`beats_ewma` (Diebold-Mariano), que el reporte semanal resalta cuando es
+`false`: en FX el campeón tiene menor QLIKE medio que EWMA aunque la
+diferencia no sea significativa, así que se mantiene sirviendo.
 
 ### Selección de la familia de volatilidad (champion-challenger)
 

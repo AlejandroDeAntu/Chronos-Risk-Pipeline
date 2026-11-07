@@ -234,8 +234,9 @@ def _registration_lines(registrations: list[sqlite3.Row]) -> list[str]:
     if not registrations:
         return ["Sin reentrenamientos esta semana."]
     lines = [
-        "| Activo | Señal | Versión | Familia | Disparador | ¿Promovido? |",
-        "|---|---|---|---|---|---|",
+        "| Activo | Señal | Versión | Familia | Disparador | ¿Promovido? | "
+        "¿Supera EWMA? |",
+        "|---|---|---|---|---|---|---|",
     ]
     for reg in registrations:
         metrics = json.loads(reg["validation_metrics_json"])
@@ -245,9 +246,34 @@ def _registration_lines(registrations: list[sqlite3.Row]) -> list[str]:
             f"| {reg['asset_symbol']} | {reg['signal_type']} | "
             f"`{reg['version']}` | {metadata.get('family', 'detector')} | "
             f"{metrics.get('triggered_by', 'sin registro')} | "
-            f"{'sí' if promoted else 'no'} |"
+            f"{'sí' if promoted else 'no'} | {_beats_ewma(metrics)} |"
         )
     return lines
+
+
+def _beats_ewma(metrics: dict[str, object]) -> str:
+    flag = metrics.get("beats_ewma")
+    if flag is None:
+        return "—"
+    return "sí" if flag else "**no**"
+
+
+def _ewma_warning(registrations: list[sqlite3.Row]) -> list[str]:
+    laggards = sorted(
+        {
+            r["asset_symbol"]
+            for r in registrations
+            if r["stage"] in ("active", "retired")
+            and json.loads(r["validation_metrics_json"]).get("beats_ewma")
+            is False
+        }
+    )
+    if not laggards:
+        return []
+    return [
+        "- Campeón promovido sin ventaja significativa sobre EWMA (sigue "
+        f"sirviendo; vigilar): {', '.join(laggards)}."
+    ]
 
 
 def render_markdown(db_path: Path, week_end: datetime) -> str:
@@ -274,6 +300,7 @@ def render_markdown(db_path: Path, week_end: datetime) -> str:
         f"- Reentrenamientos: {len(registrations)} "
         f"({sum(r['stage'] in ('active', 'retired') for r in registrations)}"
         f" promovidos); alertas de drift: {len(drift)}.",
+        *_ewma_warning(registrations),
         "",
         "**Ventaja** = cuánto mejor que el baseline es el modelo (QLIKE: "
         "baseline − modelo; F1: modelo − baseline). Positivo es bueno. "

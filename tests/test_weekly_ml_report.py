@@ -110,6 +110,28 @@ def test_markdown_lists_retrains_with_trigger(db_path: Path) -> None:
     assert "^GSPC" in text
 
 
+def test_markdown_flags_champion_that_does_not_beat_ewma(
+    db_path: Path,
+) -> None:
+    database.insert_model_version(
+        db_path,
+        "EURUSD=X",
+        GARCH,
+        "v3",
+        "candidate",
+        {"family": "garch"},
+        {"triggered_by": "fixed_cadence", "beats_ewma": False},
+        WEEK_END - timedelta(days=1),
+        promote=True,
+    )
+
+    text = weekly_ml.render_markdown(db_path, WEEK_END)
+
+    assert "| EURUSD=X | garch_volatility_forecast | `v3` | garch | " in text
+    assert "fixed_cadence | sí | **no** |" in text
+    assert "sobre EWMA (sigue sirviendo; vigilar): EURUSD=X." in text
+
+
 def test_write_report_creates_dated_file(
     db_path: Path, tmp_path: Path
 ) -> None:
