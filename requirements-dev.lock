@@ -16,6 +16,8 @@ cloudpickle==3.1.2
     # via joblib
 contourpy==1.4.0
     # via matplotlib
+coverage==7.17.2
+    # via pytest-cov
 curl-cffi==0.16.3
     # via yfinance
 cycler==0.12.1
@@ -103,6 +105,10 @@ pygments==2.21.0
 pyparsing==3.3.3
     # via matplotlib
 pytest==9.1.1
+    # via
+    #   -r requirements-dev.txt
+    #   pytest-cov
+pytest-cov==7.1.0
     # via -r requirements-dev.txt
 python-dateutil==2.9.0.post0
     # via
