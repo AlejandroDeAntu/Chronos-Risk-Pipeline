@@ -19,6 +19,7 @@ import pytest
 from src.config import AssetConfig, PipelineSettings, RetrainTriggerConfig
 from src.evaluation.metrics import qlike_loss
 from src.features.returns import compute_log_returns
+from src.models.baseline import ewma_volatility_baseline
 from src.persistence import database, registry
 from src.pipeline.evaluate_and_retrain import (
     evaluate_anomaly_for_asset,
@@ -175,7 +176,11 @@ def test_sustained_degradation_forces_retrain(
     tmp_path: Path, test_asset: AssetConfig
 ) -> None:
     settings = make_settings(
-        tmp_path, test_asset, RetrainTriggerConfig(retrain_cooldown_hours=0)
+        tmp_path,
+        test_asset,
+        RetrainTriggerConfig(
+            retrain_cooldown_hours=0, retrain_cooldown_hours_anomaly=0
+        ),
     )
     _bootstrap(settings, SignalType.ANOMALY)
     _seed_degraded_runs(settings, test_asset.symbol)
@@ -246,6 +251,12 @@ def test_fixed_cadence_forces_garch_retrain(
     assert metrics["champion_decision"]["previous"] == "garch"
     assert {"sd20", "ewma"} <= set(metrics["mean_qlike"])
     assert "p_value_one_sided" in metrics["diebold_mariano_vs_sd20"]
+    # B2: EWMA no bloquea la promoción; solo marca si el campeón le gana.
+    dm_ewma = metrics["diebold_mariano_vs_ewma"]
+    assert metrics["beats_ewma"] is (
+        dm_ewma["p_value_one_sided"] < settings.retrain.promotion_alpha
+    )
+    assert metrics["triggered_by"] == "fixed_cadence"
 
 
 def test_anomaly_backfills_out_of_sample_bars_missed_by_cron(
@@ -345,3 +356,55 @@ def test_fx_migration_supersedes_v1_predictions_and_replaces_legacy_model(
     assert result.retrain_decision.triggered_by == "migration"
     assert result.retrain_promoted is True
     assert not registry.active_volatility_is_legacy(db_path, fx.symbol)
+
+
+def test_garch_live_run_uses_ewma_baseline_over_lineage(
+    test_settings: PipelineSettings,
+    test_asset: AssetConfig,
+    synthetic_daily_prices: pd.Series,
+) -> None:
+    _bootstrap(test_settings, SignalType.GARCH_VOLATILITY_FORECAST)
+    db_path = test_settings.paths.database_path
+    returns_pct = compute_log_returns(synthetic_daily_prices) * 100.0
+    first = registry.load_active_volatility_model(db_path, test_asset.symbol)
+    assert first is not None
+    refit = dataclasses.replace(first, version="refit")
+    registry.register_candidate(
+        db_path,
+        test_asset.symbol,
+        SignalType.GARCH_VOLATILITY_FORECAST,
+        refit,
+        {"triggered_by": "fixed_cadence"},
+        promote=True,
+    )
+    # Una predicción de cada versión: el reajuste por cadencia no reinicia
+    # la evidencia, así que la corrida evalúa ambas.
+    for version, offset in ((first.version, 10), ("refit", 9)):
+        database.insert_prediction(
+            db_path,
+            test_asset.symbol,
+            SignalType.GARCH_VOLATILITY_FORECAST.value,
+            version,
+            returns_pct.index[-offset].to_pydatetime(),
+            1,
+            {"predicted_volatility_pct": 1.3},
+            NOW,
+        )
+
+    result = evaluate_garch_for_asset(test_asset, test_settings, NOW)
+
+    assert result.outcomes_closed == 2
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT n_outcomes, baseline_metric, report_json "
+            "FROM evaluation_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    report = json.loads(row[2])
+    ewma = ewma_volatility_baseline(returns_pct)
+    realized = returns_pct.iloc[[-9, -8]].to_numpy()
+    expected = qlike_loss(ewma.iloc[[-9, -8]].to_numpy(), realized).mean()
+    assert row[0] == 2
+    assert row[1] == pytest.approx(expected, rel=1e-6)
+    assert report["baseline"] == "ewma"
+    assert report["lineage_versions"] == 2
+    assert "qlike_rv_day" in report

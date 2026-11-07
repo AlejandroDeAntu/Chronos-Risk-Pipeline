@@ -1,0 +1,65 @@
+name: Reporte semanal del modelo
+
+# Cada viernes a las 21:00 de Ciudad de México (UTC-6 fijo, sin horario de
+# verano) resume cuánto mejoró el modelo frente a su baseline durante la
+# semana (src/reporting/weekly_ml.py), commitea reports/weekly/AAAA-MM-DD.md
+# y abre un Issue con el mismo contenido para que llegue por notificación.
+# GitHub puede retrasar los cron programados (en este repo, hasta ~6 h).
+
+on:
+  schedule:
+    - cron: "0 3 * * 6" # sábado 03:00 UTC = viernes 21:00 CDMX
+  workflow_dispatch:
+
+# Lee la misma base que escribe pipeline.yml: nunca en paralelo.
+concurrency:
+  group: pipeline-db
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.lock
+
+      - name: Generar reporte
+        id: report
+        run: echo "path=$(python -m src.reporting.weekly_ml)" >> "$GITHUB_OUTPUT"
+
+      - name: Versionar el reporte
+        id: commit
+        env:
+          REPORT: ${{ steps.report.outputs.path }}
+        run: |
+          git config user.name "trading-pipeline-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add "$REPORT"
+          git diff --cached --quiet && exit 0
+          git commit -m "docs: reporte semanal del modelo $(basename "$REPORT" .md)"
+          git pull --rebase --autostash
+          git push
+          echo "committed=true" >> "$GITHUB_OUTPUT"
+
+      # Solo si hubo reporte nuevo: relanzar el mismo día no duplica el Issue.
+      - name: Abrir Issue con el resumen
+        if: ${{ steps.commit.outputs.committed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ steps.report.outputs.path }}
+        run: >-
+          gh issue create
+          --title "Reporte semanal del modelo $(basename "$REPORT" .md)"
+          --body-file "$REPORT"

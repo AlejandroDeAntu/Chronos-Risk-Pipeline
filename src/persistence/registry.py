@@ -26,6 +26,7 @@ def register_candidate(
     signal_type: SignalType,
     model: AnomalyDetector | VolatilityModel,
     validation_metrics: dict[str, Any],
+    promote: bool = False,
 ) -> None:
     """Registra un modelo recién entrenado como ``candidate``.
 
@@ -45,6 +46,8 @@ def register_candidate(
         ``AnomalyDetector`` o cualquier familia de volatilidad.
     validation_metrics:
         Métricas de validación walk-forward obtenidas antes de registrar.
+    promote:
+        Registrar y promover en una sola transacción.
     """
     database.insert_model_version(
         db_path=db_path,
@@ -55,6 +58,7 @@ def register_candidate(
         metadata=model.to_metadata(),
         validation_metrics=validation_metrics,
         created_at=datetime.now(UTC),
+        promote=promote,
     )
 
 
@@ -110,6 +114,47 @@ def active_volatility_is_legacy(db_path: Path, asset_symbol: str) -> bool:
         db_path, asset_symbol, SignalType.GARCH_VOLATILITY_FORECAST.value
     )
     return row is not None and "family" not in json.loads(row["metadata_json"])
+
+
+_EVIDENCE_PRESERVING_TRIGGERS = frozenset({"fixed_cadence"})
+
+
+def volatility_lineage(db_path: Path, asset_symbol: str) -> tuple[str, ...]:
+    """Versiones cuyo historial cuenta como evidencia del modelo activo.
+
+    El reajuste semanal por cadencia solo agrega días de datos a la misma
+    familia: si cada versión empezara de cero, la ventana de degradación
+    (60 resultados) nunca se llenaría. El linaje se corta, y la evidencia
+    se reinicia, cuando cambia la familia, cuando el reentreno lo disparó
+    la degradación, el drift o una migración (el modelo viejo era el
+    problema), y en registros previos a las familias (velas FX
+    desalineadas). Un registro sin ``triggered_by`` es anterior a que se
+    guardara el disparador; todos esos reentrenos fueron por cadencia.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Versiones, de la activa hacia atrás; vacía sin modelo activo.
+    """
+    rows = database.fetch_promoted_versions(
+        db_path, asset_symbol, SignalType.GARCH_VOLATILITY_FORECAST.value
+    )
+    lineage: list[str] = []
+    family: str | None = None
+    for row in rows:
+        metadata = json.loads(row["metadata_json"])
+        if "family" not in metadata or (
+            family is not None and metadata["family"] != family
+        ):
+            break
+        family = metadata["family"]
+        lineage.append(row["version"])
+        trigger = json.loads(row["validation_metrics_json"]).get(
+            "triggered_by", "fixed_cadence"
+        )
+        if trigger not in _EVIDENCE_PRESERVING_TRIGGERS:
+            break
+    return tuple(lineage)
 
 
 def load_active_volatility_model(

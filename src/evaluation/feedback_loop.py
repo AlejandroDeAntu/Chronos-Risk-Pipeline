@@ -2,7 +2,7 @@
 
 Orden de evaluación y justificación:
 
-1. **Enfriamiento** (``retrain_cooldown_hours``): si hubo un intento de
+1. **Enfriamiento** (24 h volatilidad, 7 días anomalías): si hubo un intento de
    entrenamiento reciente para ese activo/señal, no se reintenta. Sin esto,
    un candidato que no supera al baseline deja el modelo viejo activo y el
    mismo disparador se volvería a cumplir en la siguiente corrida.
@@ -14,11 +14,13 @@ Orden de evaluación y justificación:
    Se dispara si las últimas ``degradation_consecutive_windows`` corridas
    con datos suficientes están todas peor que el baseline. Una sola mala
    ventana es ruido esperable en series financieras; varias seguidas, no.
-4. **Drift** (ADWIN) sobre la pérdida punto a punto del modelo activo.
+4. **Drift** (ADWIN) sobre la pérdida punto a punto del modelo activo
+   (solo volatilidad por defecto: ver ``drift_detection_anomaly``).
 
-Solo se consideran resultados de la versión de modelo activa: mezclar
-versiones haría que un cambio viejo siguiera disparando reentrenamientos
-después de haberse corregido.
+Solo se consideran resultados del modelo que sirve: la versión activa
+(anomalías) o su linaje de reajustes por cadencia de la misma familia
+(volatilidad, ``registry.volatility_lineage``). Mezclar modelos
+reemplazados haría que un problema ya corregido siguiera disparando.
 
 Prevención de fuga de información: el disparador solo decide *cuándo*
 reentrenar. El *cómo* (``src/pipeline/retrain.py``) valida al candidato con
@@ -53,11 +55,17 @@ def check_cooldown(
     last_registration_at: datetime | None,
     now: datetime,
     config: RetrainTriggerConfig,
+    signal_type: SignalType = SignalType.GARCH_VOLATILITY_FORECAST,
 ) -> bool:
     """Indica si hubo un intento de entrenamiento en el enfriamiento."""
-    if last_registration_at is None or config.retrain_cooldown_hours == 0:
+    hours = (
+        config.retrain_cooldown_hours_anomaly
+        if signal_type is SignalType.ANOMALY
+        else config.retrain_cooldown_hours
+    )
+    if last_registration_at is None or hours == 0:
         return False
-    cooldown = timedelta(hours=config.retrain_cooldown_hours)
+    cooldown = timedelta(hours=hours)
     return now - last_registration_at < cooldown
 
 
@@ -201,7 +209,7 @@ def decide_retrain(
             evaluated_at=evaluated_at,
         )
 
-    if check_cooldown(last_registration_at, evaluated_at, config):
+    if check_cooldown(last_registration_at, evaluated_at, config, signal_type):
         return _decision(
             False,
             f"En enfriamiento: último intento {last_registration_at}.",
@@ -223,7 +231,10 @@ def decide_retrain(
     if degradation.is_degraded:
         return _decision(True, degradation.detail, "degradation")
 
-    if config.drift_detection_enabled and check_drift(loss_stream):
+    drift_enabled = config.drift_detection_enabled and (
+        signal_type is not SignalType.ANOMALY or config.drift_detection_anomaly
+    )
+    if drift_enabled and check_drift(loss_stream):
         return _decision(
             True, "ADWIN detectó cambio en la pérdida del modelo.", "drift"
         )

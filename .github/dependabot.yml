@@ -1,0 +1,8 @@
+# Mantiene al dia los SHA fijados de las GitHub Actions (seguridad de la
+# cadena de suministro: un tag se puede mover, un SHA no).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

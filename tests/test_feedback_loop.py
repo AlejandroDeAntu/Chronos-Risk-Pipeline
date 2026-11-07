@@ -27,10 +27,11 @@ def _decide(
     model_runs: np.ndarray = HEALTHY,
     baseline_runs: np.ndarray = BASELINE,
     loss_stream: np.ndarray | None = None,
+    signal_type: SignalType = SignalType.ANOMALY,
 ) -> str:
     decision = decide_retrain(
         asset_symbol="TEST",
-        signal_type=SignalType.ANOMALY,
+        signal_type=signal_type,
         last_trained_at=NOW - timedelta(days=trained_days_ago),
         last_registration_at=(
             None
@@ -48,7 +49,7 @@ def _decide(
 
 
 def test_nothing_triggers_for_healthy_recent_model() -> None:
-    assert _decide(RetrainTriggerConfig(), 2, 48) == "none"
+    assert _decide(RetrainTriggerConfig(), 2, 200) == "none"
 
 
 def test_fixed_cadence_triggers_after_configured_days() -> None:
@@ -65,7 +66,7 @@ def test_cooldown_suppresses_every_other_trigger() -> None:
 
 def test_sustained_degradation_triggers() -> None:
     degraded = np.array([0.10, 0.12, 0.08])
-    assert _decide(RetrainTriggerConfig(), 2, 48, degraded) == "degradation"
+    assert _decide(RetrainTriggerConfig(), 2, 200, degraded) == "degradation"
 
 
 def test_single_bad_run_does_not_trigger() -> None:
@@ -97,8 +98,40 @@ def test_drift_detected_on_mean_shift(rng: np.random.Generator) -> None:
         [rng.normal(0.0, 1.0, 300), rng.normal(8.0, 1.0, 300)]
     )
     assert check_drift(stream) is True
-    shifted = _decide(RetrainTriggerConfig(), 2, 48, loss_stream=stream)
+    shifted = _decide(
+        RetrainTriggerConfig(),
+        2,
+        48,
+        loss_stream=stream,
+        signal_type=SignalType.GARCH_VOLATILITY_FORECAST,
+    )
     assert shifted == "drift"
+
+
+def test_anomaly_ignores_adwin_by_default(rng: np.random.Generator) -> None:
+    # La pérdida 0/1 sobre ventanas solapadas hace que ADWIN dispare por
+    # ruido: con el detector cerca del azar provocaba reentrenos diarios.
+    stream = np.concatenate(
+        [rng.normal(0.0, 1.0, 300), rng.normal(8.0, 1.0, 300)]
+    )
+    assert _decide(RetrainTriggerConfig(), 2, 200, loss_stream=stream) == (
+        "none"
+    )
+
+
+def test_anomaly_cooldown_is_one_week() -> None:
+    degraded = np.array([0.10, 0.12, 0.08])
+    assert _decide(RetrainTriggerConfig(), 2, 100, degraded) == "cooldown"
+    assert (
+        _decide(
+            RetrainTriggerConfig(),
+            2,
+            100,
+            degraded,
+            signal_type=SignalType.GARCH_VOLATILITY_FORECAST,
+        )
+        == "degradation"
+    )
 
 
 def test_no_drift_on_stable_stream(rng: np.random.Generator) -> None:
