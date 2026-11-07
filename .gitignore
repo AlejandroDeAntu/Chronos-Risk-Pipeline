@@ -23,6 +23,8 @@ __pycache__/
 # Reportes de backtest locales (se suben solo los que se citan en el README)
 reports/*
 !reports/.gitkeep
+# El reporte semanal del modelo sí se versiona (lo commitea Actions).
+!reports/weekly/
 
 # Editor (se versiona solo la configuración compartida del proyecto)
 .vscode/*

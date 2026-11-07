@@ -52,13 +52,22 @@ qué se reentrenó (o no).
 
 ### Disparador de reentrenamiento
 
-1. **Enfriamiento de 24 h** entre intentos (evita bucles si un candidato no
-   se promueve).
+1. **Enfriamiento** entre intentos: 24 h en volatilidad, 7 días en
+   anomalías (evita bucles si un candidato no se promueve).
 2. **Cadencia fija**: 30 días (anomalías) / 7 días (GARCH).
 3. **Degradación sostenida**: 3 corridas seguidas con el modelo activo peor
    que su baseline (F1 sobre los últimos 500 resultados / QLIKE sobre los
    últimos 60), con muestra mínima exigida.
-4. **Drift**: ADWIN sobre la pérdida punto a punto del modelo activo.
+4. **Drift**: ADWIN sobre la pérdida punto a punto del modelo activo (solo
+   volatilidad: en anomalías la pérdida 0/1 sobre ventanas solapadas
+   disparaba por ruido).
+
+En volatilidad la evidencia en vivo es la del **linaje** del modelo activo:
+los reajustes semanales por cadencia de la misma familia comparten
+historial, y se reinicia al cambiar de familia o tras un reentreno por
+degradación, drift o migración. El baseline en vivo es EWMA (λ = 0.94), el
+mismo del walk-forward. Cada candidato guarda en `model_registry` qué lo
+disparó (`triggered_by`).
 
 Un candidato solo reemplaza al modelo activo si supera al baseline en una
 validación walk-forward (`TimeSeriesSplit`, nunca split aleatorio; con
@@ -184,6 +193,10 @@ estos resultados y corrigió cinco defectos de medición:
 - `.github/workflows/report.yml`: cada lunes a las 01:00 UTC (y a mano con
   `workflow_dispatch`) genera el reporte y lo publica como artefacto de la
   corrida.
+- `.github/workflows/weekly-ml-report.yml`: cada viernes a las 21:00 de
+  Ciudad de México resume cuánto mejoró el modelo frente a su baseline
+  (`python -m src.reporting.weekly_ml`), commitea
+  `reports/weekly/AAAA-MM-DD.md` y abre un Issue con el resumen.
 - `.github/workflows/ci.yml`: en cada push, Ruff (PEP8 a 79 columnas, type
   hints, docstrings, sin `except` genérico) y pytest.
 
