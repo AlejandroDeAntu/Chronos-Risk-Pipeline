@@ -35,16 +35,15 @@ from src.data.validation import (
     validate_log_returns,
     warn_if_stale,
 )
-from src.exceptions import DataContractError, TradingPipelineError
+from src.exceptions import DataContractError
 from src.features.returns import (
     compute_intraday_log_returns,
 )
 from src.models.anomaly_model import AnomalyDetector
 from src.models.scenarios import filtered_tail_risk, price_quantiles
 from src.models.volatility import fit_volatility_model, volatility_frame
-from src.notifications.notifier import notify_failure
 from src.persistence import database, registry
-from src.pipeline.results import AssetStageResult, Stage
+from src.pipeline.results import AssetStageResult, Stage, run_isolated
 from src.schemas import (
     AnomalyPredictionPayload,
     SignalType,
@@ -250,9 +249,7 @@ def predict_anomaly_for_asset(
             SignalType.ANOMALY,
             detector,
             _COLD_START_METRICS,
-        )
-        registry.promote_candidate(
-            db_path, asset.symbol, SignalType.ANOMALY, detector.version
+            promote=True,
         )
 
     log_return = load_intraday_returns(
@@ -363,12 +360,7 @@ def predict_garch_for_asset(
             SignalType.GARCH_VOLATILITY_FORECAST,
             model,
             _COLD_START_METRICS,
-        )
-        registry.promote_candidate(
-            db_path,
-            asset.symbol,
-            SignalType.GARCH_VOLATILITY_FORECAST,
-            model.version,
+            promote=True,
         )
 
     forecast_origin = close.index[-1].to_pydatetime()
@@ -467,19 +459,12 @@ def run_predictions(
     """
     timestamp = run_ts or datetime.now(UTC)
     predictor = _PREDICTORS[signal_type]
-    results: list[AssetStageResult] = []
-    for asset in settings.assets:
-        try:
-            results.append(predictor(asset, settings, timestamp))
-        except TradingPipelineError as exc:
-            notify_failure(f"predict:{signal_type.value}:{asset.symbol}", exc)
-            results.append(
-                AssetStageResult(
-                    asset_symbol=asset.symbol,
-                    signal_type=signal_type,
-                    stage=Stage.PREDICT,
-                    succeeded=False,
-                    detail=f"{type(exc).__name__}: {exc}",
-                )
-            )
-    return results
+    return [
+        run_isolated(
+            lambda a=asset: predictor(a, settings, timestamp),
+            asset.symbol,
+            signal_type,
+            Stage.PREDICT,
+        )
+        for asset in settings.assets
+    ]

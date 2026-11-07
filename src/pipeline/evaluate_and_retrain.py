@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
@@ -33,17 +33,16 @@ from src.evaluation.metrics import (
     evaluate_volatility_forecast,
     qlike_loss,
 )
-from src.exceptions import InsufficientHistoryError, TradingPipelineError
+from src.exceptions import InsufficientHistoryError
 from src.models.anomaly_model import label_reversion_outcomes
 from src.models.baseline import (
+    ewma_volatility_baseline,
     random_anomaly_baseline,
-    trailing_volatility_baseline,
 )
 from src.models.volatility import volatility_frame
-from src.notifications.notifier import notify_failure
 from src.persistence import database, registry
 from src.pipeline.predict import load_daily_ohlc, load_intraday_returns
-from src.pipeline.results import AssetStageResult, Stage
+from src.pipeline.results import AssetStageResult, Stage, run_isolated
 from src.pipeline.retrain import (
     retrain_anomaly_model,
     retrain_volatility_model,
@@ -51,6 +50,11 @@ from src.pipeline.retrain import (
 from src.schemas import RetrainDecision, SignalType
 
 logger = logging.getLogger(__name__)
+
+LIVE_VOLATILITY_BASELINE = "ewma"
+"""Baseline del lazo en vivo: el mismo EWMA RiskMetrics (lambda = 0.94)
+del walk-forward y del reporte. Hasta 2026-11 era SD-20d, un rival débil
+que el modelo superaba siempre; las corridas viejas conservan su valor."""
 
 
 def _close_anomaly_outcomes(
@@ -176,17 +180,12 @@ def _close_garch_outcomes(
     if not pending:
         return 0
     returns_pct = log_return * 100.0
-    baseline = trailing_volatility_baseline(
-        returns_pct, settings.garch.baseline_trailing_window
-    )
+    baseline = ewma_volatility_baseline(returns_pct)
     closed = 0
     for row in pending:
-        origin = pd.Timestamp(row["reference_timestamp"])
-        if origin not in returns_pct.index:
-            continue
-        target = returns_pct.index.get_loc(origin) + 1
-        if target >= len(returns_pct):
-            continue  # El día pronosticado aún no cierra.
+        target = _target_position(returns_pct.index, row)
+        if target is None:
+            continue  # Origen fuera de la serie o día aún sin cerrar.
         baseline_vol = float(baseline.iloc[target])
         if not np.isfinite(baseline_vol) or baseline_vol <= 0.0:
             continue
@@ -209,37 +208,81 @@ def _close_garch_outcomes(
     return closed
 
 
+def _target_position(index: pd.Index, row: dict[str, Any]) -> int | None:
+    """Posición del día pronosticado (origen + 1), o ``None`` si no cerró."""
+    origin = pd.Timestamp(row["reference_timestamp"])
+    if origin not in index:
+        return None
+    target = index.get_loc(origin) + 1
+    return target if target < len(index) else None
+
+
 def _record_garch_run(
     asset: AssetConfig,
     settings: PipelineSettings,
-    model_version: str,
+    versions: Sequence[str],
+    frame: pd.DataFrame,
     now: datetime,
 ) -> list[dict[str, Any]]:
-    """Guarda QLIKE modelo vs baseline de la ventana reciente."""
+    """Guarda QLIKE modelo vs baseline EWMA de la ventana del linaje.
+
+    El baseline se recalcula sobre la serie actual en lugar de leerse de
+    ``outcomes``: así toda la ventana se compara contra el mismo rival
+    aunque haya resultados cerrados antes del cambio de baseline.
+    """
     recent = database.fetch_recent_outcomes(
         settings.paths.database_path,
         asset.symbol,
         SignalType.GARCH_VOLATILITY_FORECAST.value,
-        model_version,
+        versions,
         settings.retrain.degradation_window_garch,
     )
     if not recent:
         return recent
+    baseline_series = ewma_volatility_baseline(frame["return_pct"])
+    targets = [_target_position(frame.index, r) for r in recent]
+    baseline = np.array(
+        [
+            r["baseline_predicted_value"]
+            if t is None
+            else float(baseline_series.iloc[t])
+            for r, t in zip(recent, targets, strict=True)
+        ]
+    )
+    predicted = np.array(
+        [
+            json.loads(r["payload_json"])["predicted_volatility_pct"]
+            for r in recent
+        ]
+    )
     report = evaluate_volatility_forecast(
-        np.array(
-            [
-                json.loads(r["payload_json"])["predicted_volatility_pct"]
-                for r in recent
-            ]
-        ),
+        predicted,
         np.array([r["realized_value"] for r in recent]),
-        np.array([r["baseline_predicted_value"] for r in recent]),
+        baseline,
+    )
+    # Proxy secundario menos ruidoso que r^2 (solo informativo: la varianza
+    # por rango subestima, así que no decide reentrenos ni promociones).
+    rv_day = np.array(
+        [np.nan if t is None else frame["rv_day"].iloc[t] for t in targets]
+    )
+    valid = np.isfinite(rv_day) & (rv_day > 0.0)
+    rv_extra = (
+        {
+            "qlike_rv_day": float(
+                qlike_loss(predicted[valid], np.sqrt(rv_day[valid])).mean()
+            ),
+            "baseline_qlike_rv_day": float(
+                qlike_loss(baseline[valid], np.sqrt(rv_day[valid])).mean()
+            ),
+        }
+        if valid.any()
+        else {"qlike_rv_day": None, "baseline_qlike_rv_day": None}
     )
     database.insert_evaluation_run(
         db_path=settings.paths.database_path,
         asset_symbol=asset.symbol,
         signal_type=SignalType.GARCH_VOLATILITY_FORECAST.value,
-        model_version=model_version,
+        model_version=versions[0],
         evaluated_at=now,
         n_outcomes=report.n_samples,
         metric_name="qlike",
@@ -247,7 +290,12 @@ def _record_garch_run(
         baseline_metric=report.baseline_qlike,
         sufficient_data=report.n_samples
         >= settings.retrain.min_outcomes_garch,
-        report=asdict(report),
+        report={
+            **asdict(report),
+            **rv_extra,
+            "baseline": LIVE_VOLATILITY_BASELINE,
+            "lineage_versions": len(versions),
+        },
     )
     return recent
 
@@ -256,7 +304,7 @@ def _decide(
     asset: AssetConfig,
     settings: PipelineSettings,
     signal_type: SignalType,
-    model_version: str,
+    model_versions: str | Sequence[str],
     trained_at: datetime,
     recent: list[dict[str, Any]],
     higher_is_better: bool,
@@ -268,7 +316,7 @@ def _decide(
         db_path,
         asset.symbol,
         signal_type.value,
-        model_version,
+        model_versions,
         settings.retrain.degradation_consecutive_windows,
     )
     return decide_retrain(
@@ -338,7 +386,9 @@ def evaluate_anomaly_for_asset(
     )
     promoted = None
     if decision.should_retrain:
-        promoted = retrain_anomaly_model(asset, settings, log_return).promoted
+        promoted = retrain_anomaly_model(
+            asset, settings, log_return, decision
+        ).promoted
 
     detail = (
         f"{closed} resultados cerrados, {len(pending) - closed} pendientes; "
@@ -389,14 +439,19 @@ def evaluate_garch_for_asset(
         ),
     )
     closed = _close_garch_outcomes(settings, pending, log_return, now)
+    # Evidencia del linaje (reajustes por cadencia de la misma familia); un
+    # activo heredado sin familia solo cuenta sus propios resultados.
+    versions = registry.volatility_lineage(db_path, asset.symbol) or (
+        model.version,
+    )
     recent = (
-        _record_garch_run(asset, settings, model.version, now)
+        _record_garch_run(asset, settings, versions, frame, now)
         if closed
         else database.fetch_recent_outcomes(
             db_path,
             asset.symbol,
             signal.value,
-            model.version,
+            versions,
             settings.retrain.degradation_window_garch,
         )
     )
@@ -419,7 +474,7 @@ def evaluate_garch_for_asset(
             asset,
             settings,
             signal,
-            model.version,
+            versions,
             model.trained_at,
             recent,
             higher_is_better=False,
@@ -428,7 +483,12 @@ def evaluate_garch_for_asset(
     promoted = None
     if decision.should_retrain:
         promoted = retrain_volatility_model(
-            asset, settings, frame, model.family, force_promote=migrate
+            asset,
+            settings,
+            frame,
+            model.family,
+            decision,
+            force_promote=migrate,
         ).promoted
 
     detail = (
@@ -481,19 +541,12 @@ def run_evaluations(
     """
     timestamp = now or datetime.now(UTC)
     evaluator = _EVALUATORS[signal_type]
-    results: list[AssetStageResult] = []
-    for asset in settings.assets:
-        try:
-            results.append(evaluator(asset, settings, timestamp))
-        except TradingPipelineError as exc:
-            notify_failure(f"evaluate:{signal_type.value}:{asset.symbol}", exc)
-            results.append(
-                AssetStageResult(
-                    asset_symbol=asset.symbol,
-                    signal_type=signal_type,
-                    stage=Stage.EVALUATE,
-                    succeeded=False,
-                    detail=f"{type(exc).__name__}: {exc}",
-                )
-            )
-    return results
+    return [
+        run_isolated(
+            lambda a=asset: evaluator(a, settings, timestamp),
+            asset.symbol,
+            signal_type,
+            Stage.EVALUATE,
+        )
+        for asset in settings.assets
+    ]

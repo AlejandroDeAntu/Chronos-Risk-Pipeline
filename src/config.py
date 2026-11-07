@@ -190,6 +190,15 @@ class RetrainTriggerConfig(BaseModel):
             "activo/señal, para evitar bucles si el candidato no se promueve."
         ),
     )
+    retrain_cooldown_hours_anomaly: int = Field(
+        default=168,
+        ge=0,
+        description=(
+            "Enfriamiento del detector de anomalías. Con lift cercano a 1 "
+            "casi ningún candidato se promueve y con 24 h se reintentaba a "
+            "diario (39 candidatos en 6 semanas); una semana basta."
+        ),
+    )
     walk_forward_splits: int = Field(default=4, ge=2)
     promotion_alpha: float = Field(
         default=0.05,
@@ -202,6 +211,14 @@ class RetrainTriggerConfig(BaseModel):
         ),
     )
     drift_detection_enabled: bool = Field(default=True)
+    drift_detection_anomaly: bool = Field(
+        default=False,
+        description=(
+            "ADWIN sobre la pérdida 0/1 del detector, recalculada cada "
+            "corrida sobre ventanas solapadas, señala drift por ruido; "
+            "cadencia y degradación siguen activas."
+        ),
+    )
 
 
 class DataQualityConfig(BaseModel):

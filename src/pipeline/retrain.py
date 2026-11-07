@@ -54,7 +54,7 @@ from src.models.baseline import (
 )
 from src.models.volatility import fit_volatility_model
 from src.persistence import registry
-from src.schemas import SignalType
+from src.schemas import RetrainDecision, SignalType
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +177,21 @@ def walk_forward_anomaly(
     )
 
 
+def _trigger_metrics(decision: RetrainDecision | None) -> dict[str, Any]:
+    """Qué disparó el reentreno, para auditarlo en ``model_registry``."""
+    if decision is None:
+        return {"triggered_by": "manual", "trigger_reason": None}
+    return {
+        "triggered_by": decision.triggered_by,
+        "trigger_reason": decision.reason,
+    }
+
+
 def retrain_anomaly_model(
-    asset: AssetConfig, settings: PipelineSettings, log_return: pd.Series
+    asset: AssetConfig,
+    settings: PipelineSettings,
+    log_return: pd.Series,
+    decision: RetrainDecision | None = None,
 ) -> RetrainOutcome:
     """Valida, reentrena y promueve (si corresponde) el detector de un activo.
 
@@ -190,6 +203,8 @@ def retrain_anomaly_model(
         Configuración del pipeline.
     log_return:
         Retornos intradía disponibles (sin retornos de salto).
+    decision:
+        Decisión del disparador; se guarda con el candidato.
 
     Returns
     -------
@@ -223,6 +238,7 @@ def retrain_anomaly_model(
         "pooled_report": asdict(pooled),
         "precision_lift": asdict(lift) if lift is not None else None,
         "promoted": promote,
+        **_trigger_metrics(decision),
     }
     registry.register_candidate(
         settings.paths.database_path,
@@ -230,6 +246,7 @@ def retrain_anomaly_model(
         SignalType.ANOMALY,
         candidate,
         metrics,
+        promote=promote,
     )
     lift_text = (
         f"lift precisión {lift.lift:.3f} (p={lift.p_value:.4f})"
@@ -238,12 +255,6 @@ def retrain_anomaly_model(
     )
     reason = f"{lift_text}; anomalías {pooled.n_predicted_positive}"
     if promote:
-        registry.promote_candidate(
-            settings.paths.database_path,
-            asset.symbol,
-            SignalType.ANOMALY,
-            candidate.version,
-        )
         logger.info("Detector de '%s' promovido: %s.", asset.symbol, reason)
     else:
         logger.warning(
@@ -282,6 +293,7 @@ def retrain_volatility_model(
     settings: PipelineSettings,
     frame: pd.DataFrame,
     current_family: str,
+    decision: RetrainDecision | None = None,
     force_promote: bool = False,
 ) -> RetrainOutcome:
     """Selecciona la familia campeona, reentrena y promueve si corresponde.
@@ -303,6 +315,8 @@ def retrain_volatility_model(
         Salida de ``volatility_frame`` con todo el historial disponible.
     current_family:
         Familia del modelo activo.
+    decision:
+        Decisión del disparador; se guarda con el candidato.
     force_promote:
         Promover aunque no supere el piso: solo para reemplazar un modelo
         activo inválido (migración de datos).
@@ -316,18 +330,18 @@ def retrain_volatility_model(
     walk_forward = walk_forward_volatility(
         frame, settings, settings.garch.candidate_families
     )
-    decision = select_champion(walk_forward, current_family, alpha)
-    champion_loss = walk_forward.qlike(decision.champion)
+    champion = select_champion(walk_forward, current_family, alpha)
+    champion_loss = walk_forward.qlike(champion.champion)
     baseline_loss = walk_forward.qlike("sd20")
     common = walk_forward.common_mask
     dm = diebold_mariano(champion_loss[common], baseline_loss[common])
     promote = force_promote or dm.p_value_one_sided < alpha
 
     candidate = fit_volatility_model(
-        frame, decision.champion, settings.garch.min_history_days
+        frame, champion.champion, settings.garch.min_history_days
     )
     metrics = {
-        "champion_decision": asdict(decision),
+        "champion_decision": asdict(champion),
         "mean_qlike": {
             name: walk_forward.mean_qlike(name)
             for name in (*walk_forward.forecasts, "sd20", "ewma")
@@ -339,6 +353,7 @@ def retrain_volatility_model(
         "reproducibility": _fingerprint(frame),
         "diebold_mariano_vs_sd20": asdict(dm),
         "promoted": promote,
+        **_trigger_metrics(decision),
     }
     registry.register_candidate(
         settings.paths.database_path,
@@ -346,18 +361,13 @@ def retrain_volatility_model(
         SignalType.GARCH_VOLATILITY_FORECAST,
         candidate,
         metrics,
+        promote=promote,
     )
     reason = (
-        f"{decision.reason} Campeón '{decision.champion}' vs SD-20d: DM "
+        f"{champion.reason} Campeón '{champion.champion}' vs SD-20d: DM "
         f"t={dm.t_stat:.2f} (p={dm.p_value_one_sided:.4f})"
     )
     if promote:
-        registry.promote_candidate(
-            settings.paths.database_path,
-            asset.symbol,
-            SignalType.GARCH_VOLATILITY_FORECAST,
-            candidate.version,
-        )
         logger.info("Volatilidad de '%s' promovida: %s.", asset.symbol, reason)
     else:
         logger.warning(

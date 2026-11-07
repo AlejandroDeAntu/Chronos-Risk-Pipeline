@@ -150,3 +150,42 @@ def test_fetch_latest_evaluation_runs_returns_one_row_per_pair(
 
     assert row["asset_symbol"] == "^GSPC"
     assert row["model_metric"] == 0.2
+
+
+def test_recent_outcomes_accept_several_versions(db_path: Path) -> None:
+    first = _insert(db_path, "v1", minutes=0)
+    second = _insert(db_path, "v2", minutes=5)
+    other = _insert(db_path, "v3", minutes=10)
+    for prediction_id in (first, second, other):
+        database.insert_outcome(
+            db_path, prediction_id, 1.0, 0.0, 0.0, 1.0, RUN
+        )
+
+    recent = database.fetch_recent_outcomes(
+        db_path, "TEST", "anomaly", ("v1", "v2"), 10
+    )
+
+    assert [r["prediction_id"] for r in recent] == [first, second]
+
+
+def test_insert_model_version_can_promote_atomically(db_path: Path) -> None:
+    database.insert_model_version(
+        db_path, "TEST", "anomaly", "v1", "active", {}, {}, RUN
+    )
+    database.insert_model_version(
+        db_path,
+        "TEST",
+        "anomaly",
+        "v2",
+        "candidate",
+        {},
+        {},
+        RUN + timedelta(minutes=1),
+        promote=True,
+    )
+
+    active = database.get_active_model(db_path, "TEST", "anomaly")
+    promoted = database.fetch_promoted_versions(db_path, "TEST", "anomaly")
+    assert active is not None
+    assert active["version"] == "v2"
+    assert [r["version"] for r in promoted] == ["v2", "v1"]

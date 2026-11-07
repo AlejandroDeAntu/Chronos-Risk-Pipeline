@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -82,6 +82,23 @@ CREATE INDEX IF NOT EXISTS idx_registry_active
 """
 
 
+def _versions(model_versions: str | Sequence[str]) -> tuple[str, ...]:
+    """Normaliza una versión o varias a una tupla no vacía."""
+    versions = (
+        (model_versions,)
+        if isinstance(model_versions, str)
+        else tuple(model_versions)
+    )
+    if not versions:
+        raise ValueError("Se requiere al menos una versión de modelo.")
+    return versions
+
+
+def _placeholders(values: Sequence[Any]) -> str:
+    """``?, ?, ...`` para un ``IN`` parametrizado (nunca valores en SQL)."""
+    return ", ".join("?" for _ in values)
+
+
 @contextmanager
 def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     """Abre una conexión con claves foráneas activas y la cierra al salir.
@@ -96,9 +113,9 @@ def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(db_path)
     except sqlite3.Error as exc:
         raise PersistenceError(f"No se pudo abrir '{db_path}': {exc}") from exc
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.row_factory = sqlite3.Row
     try:
+        conn.execute("PRAGMA foreign_keys = ON;")
+        conn.row_factory = sqlite3.Row
         yield conn
         conn.commit()
     except sqlite3.Error as exc:
@@ -276,17 +293,19 @@ def fetch_recent_outcomes(
     db_path: Path,
     asset_symbol: str,
     signal_type: str,
-    model_version: str,
+    model_versions: str | Sequence[str],
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Últimos resultados de una versión de modelo, en orden cronológico.
+    """Últimos resultados de una o varias versiones, en orden cronológico.
 
-    El filtro por ``model_version`` es deliberado: la degradación se mide
-    solo sobre el modelo que está sirviendo, no sobre versiones anteriores.
+    La degradación se mide sobre el modelo que está sirviendo: una versión
+    (anomalías) o su linaje de reajustes de la misma familia (volatilidad,
+    ver ``registry.volatility_lineage``), nunca sobre modelos reemplazados.
     """
+    versions = _versions(model_versions)
     with _connect(db_path) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT * FROM (
                 SELECT p.id AS prediction_id, p.reference_timestamp,
                        p.payload_json, o.realized_value,
@@ -295,12 +314,12 @@ def fetch_recent_outcomes(
                 FROM outcomes o
                 JOIN predictions p ON p.id = o.prediction_id
                 WHERE p.asset_symbol = ? AND p.signal_type = ?
-                  AND p.model_version = ?
+                  AND p.model_version IN ({_placeholders(versions)})
                 ORDER BY p.reference_timestamp DESC
                 LIMIT ?
             ) ORDER BY reference_timestamp ASC
             """,
-            (asset_symbol, signal_type, model_version, limit),
+            (asset_symbol, signal_type, *versions, limit),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -347,24 +366,26 @@ def fetch_recent_evaluation_runs(
     db_path: Path,
     asset_symbol: str,
     signal_type: str,
-    model_version: str,
+    model_versions: str | Sequence[str],
     limit: int,
 ) -> list[dict[str, Any]]:
     """Últimas corridas con datos suficientes, en orden cronológico."""
+    versions = _versions(model_versions)
     with _connect(db_path) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT * FROM (
                 SELECT evaluated_at, n_outcomes, metric_name, model_metric,
                        baseline_metric
                 FROM evaluation_runs
                 WHERE asset_symbol = ? AND signal_type = ?
-                  AND model_version = ? AND sufficient_data = 1
+                  AND model_version IN ({_placeholders(versions)})
+                  AND sufficient_data = 1
                 ORDER BY evaluated_at DESC
                 LIMIT ?
             ) ORDER BY evaluated_at ASC
             """,
-            (asset_symbol, signal_type, model_version, limit),
+            (asset_symbol, signal_type, *versions, limit),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -402,9 +423,25 @@ def insert_model_version(
     metadata: dict[str, Any],
     validation_metrics: dict[str, Any],
     created_at: datetime,
+    promote: bool = False,
 ) -> int:
-    """Registra una nueva versión de modelo y devuelve su id."""
+    """Registra una nueva versión de modelo y devuelve su id.
+
+    Con ``promote=True`` la versión entra como ``active`` y la activa previa
+    pasa a ``retired`` en la misma transacción: nunca queda un candidato
+    registrado a medias ni dos modelos activos.
+    """
     with _connect(db_path) as conn:
+        if promote:
+            stage = "active"
+            conn.execute(
+                """
+                UPDATE model_registry SET stage = 'retired'
+                WHERE asset_symbol = ? AND signal_type = ?
+                  AND stage = 'active'
+                """,
+                (asset_symbol, signal_type),
+            )
         cursor = conn.execute(
             """
             INSERT INTO model_registry
@@ -423,6 +460,25 @@ def insert_model_version(
             ),
         )
         return int(cursor.lastrowid)
+
+
+def fetch_promoted_versions(
+    db_path: Path, asset_symbol: str, signal_type: str
+) -> list[dict[str, Any]]:
+    """Versiones que sirvieron (activa y retiradas), recientes primero."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT version, metadata_json, validation_metrics_json,
+                   created_at
+            FROM model_registry
+            WHERE asset_symbol = ? AND signal_type = ?
+              AND stage IN ('active', 'retired')
+            ORDER BY created_at DESC
+            """,
+            (asset_symbol, signal_type),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def get_active_model(
