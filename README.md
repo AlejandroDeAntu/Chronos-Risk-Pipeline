@@ -105,9 +105,17 @@ API key: `yfinance` es pública.
 python -m venv .venv
 .venv\Scripts\activate                 # Windows (macOS/Linux: source .venv/bin/activate)
 pip install -r requirements-dev.lock   # versiones fijadas (las de CI)
-pytest -q                              # 156 pruebas, sin red
+pytest -q                              # 182 pruebas, sin red
 python run_pipeline.py                 # ciclo completo, todos los activos
 python run_pipeline.py --mode report   # reporte HTML + PDF + PNG -> reports/
+```
+
+Los `.lock` llevan hashes SHA-256 (pip los verifica al instalar). Para
+regenerarlos tras cambiar un `requirements*.txt`:
+
+```bash
+uv pip compile requirements.txt -o requirements.lock --generate-hashes --python-version 3.12 --python-platform x86_64-manylinux_2_28 --no-header --annotation-style line
+uv pip compile requirements-dev.txt -o requirements-dev.lock --generate-hashes --python-version 3.12 --python-platform x86_64-manylinux_2_28 --no-header --annotation-style line
 ```
 
 | Comando | Qué hace | Escribe en la base |

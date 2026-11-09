@@ -4,7 +4,7 @@ Lee ``evaluation_runs`` y ``model_registry`` de ``data/pipeline.db`` (solo
 lectura) y escribe ``reports/weekly/AAAA-MM-DD.md``. Lo ejecuta cada viernes
 a las 21:00 de Ciudad de México ``.github/workflows/weekly-ml-report.yml``::
 
-    python -m src.reporting.weekly_ml            # corte = ahora
+    python -m src.reporting.weekly_ml            # corte = último viernes 21:00
     python -m src.reporting.weekly_ml --week-end 2026-11-14T03:00:00+00:00
 
 Métrica de mejora: la **ventaja** sobre el baseline en las corridas con
@@ -33,6 +33,8 @@ CDMX = timezone(timedelta(hours=-6), "CDMX")
 """Ciudad de México no tiene horario de verano desde 2022 (UTC-6 fijo)."""
 
 N_WEEKS = 4
+_FRIDAY = 4
+_CUTOFF_HOUR = 21
 _WEEK = timedelta(days=7)
 _SIGNAL_LABELS = {
     "anomaly": "Anomalías (F1)",
@@ -86,6 +88,21 @@ class AssetRow:
         if delta is None or delta == 0.0:
             return "igual"
         return "mejoró" if delta > 0.0 else "empeoró"
+
+
+def last_cutoff(now: datetime) -> datetime:
+    """Último viernes 21:00 CDMX en o antes de ``now`` (en UTC).
+
+    El cron de GitHub puede arrancar horas tarde; anclar el corte evita que
+    el reporte cambie de fecha o de ventana según el retraso.
+    """
+    local = now.astimezone(CDMX)
+    cutoff = local.replace(
+        hour=_CUTOFF_HOUR, minute=0, second=0, microsecond=0
+    ) - timedelta(days=(local.weekday() - _FRIDAY) % 7)
+    if cutoff > local:
+        cutoff -= _WEEK
+    return cutoff.astimezone(UTC)
 
 
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
@@ -335,7 +352,7 @@ def write_report(
     db_path: Path, out_dir: Path, week_end: datetime | None = None
 ) -> Path:
     """Escribe el reporte y devuelve su ruta (``AAAA-MM-DD.md`` en CDMX)."""
-    end = week_end or datetime.now(UTC)
+    end = week_end or last_cutoff(datetime.now(UTC))
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{end.astimezone(CDMX):%Y-%m-%d}.md"
     path.write_text(render_markdown(db_path, end), encoding="utf-8")
@@ -354,7 +371,8 @@ def main(argv: list[str] | None = None) -> int:
         "--week-end",
         type=datetime.fromisoformat,
         default=None,
-        help="Corte ISO 8601 con zona horaria (por defecto, ahora).",
+        help="Corte ISO 8601 con zona horaria (por defecto, el último "
+        "viernes 21:00 CDMX).",
     )
     args = parser.parse_args(argv)
     if args.week_end is not None and args.week_end.tzinfo is None:
