@@ -141,3 +141,15 @@ def test_write_report_creates_dated_file(
 
     assert path.name == "2026-11-13.md"
     assert path.read_text(encoding="utf-8").startswith("# Reporte semanal")
+
+
+@pytest.mark.parametrize(
+    "now",
+    [
+        datetime(2026, 11, 14, 3, 0, tzinfo=UTC),  # a la hora exacta
+        datetime(2026, 11, 14, 9, 50, tzinfo=UTC),  # cron con 7 h de retraso
+        datetime(2026, 11, 20, 23, 0, tzinfo=UTC),  # manual el viernes 17:00
+    ],
+)
+def test_default_cutoff_is_last_friday_9pm_cdmx(now: datetime) -> None:
+    assert weekly_ml.last_cutoff(now) == WEEK_END
