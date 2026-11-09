@@ -8,6 +8,8 @@ name: CI
 on:
   push:
     branches: [main]
+    # Los commits de datos y reportes del bot no tocan código.
+    paths-ignore: ["data/**", "reports/**"]
   pull_request:
 
 permissions:
