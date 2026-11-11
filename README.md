@@ -1,5 +1,13 @@
 # Señales automatizadas de anomalías y volatilidad
 
+[![CI](https://github.com/AlejandroDeAntu/Chronos-Risk-Pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/AlejandroDeAntu/Chronos-Risk-Pipeline/actions/workflows/ci.yml)
+[![Pipeline](https://github.com/AlejandroDeAntu/Chronos-Risk-Pipeline/actions/workflows/pipeline.yml/badge.svg)](https://github.com/AlejandroDeAntu/Chronos-Risk-Pipeline/actions/workflows/pipeline.yml)
+[![Licencia: MIT](https://img.shields.io/badge/licencia-MIT-blue.svg)](LICENSE)
+
+**[Ver el último reporte en vivo](https://alejandrodeantu.github.io/Chronos-Risk-Pipeline/)**
+(se regenera cada lunes) ·
+[reportes semanales del modelo](reports/weekly/)
+
 Sistema que vigila 7 activos (S&P 500, NASDAQ 100, Dow Jones 30, EUR/USD,
 GBP/USD, USD/JPY, USD/CAD) sin intervención humana: detecta movimientos de
 precio estadísticamente inusuales, pronostica la volatilidad del día
@@ -105,7 +113,7 @@ API key: `yfinance` es pública.
 python -m venv .venv
 .venv\Scripts\activate                 # Windows (macOS/Linux: source .venv/bin/activate)
 pip install -r requirements-dev.lock   # versiones fijadas (las de CI)
-pytest -q                              # 182 pruebas, sin red
+pytest -q                              # 191 pruebas, sin red
 python run_pipeline.py                 # ciclo completo, todos los activos
 python run_pipeline.py --mode report   # reporte HTML + PDF + PNG -> reports/
 ```
@@ -121,7 +129,7 @@ uv pip compile requirements-dev.txt -o requirements-dev.lock --generate-hashes -
 | Comando | Qué hace | Escribe en la base |
 |---|---|---|
 | `python run_pipeline.py` | Predice, evalúa y decide reentrenar (ambas señales) | Sí |
-| `python run_pipeline.py --signals anomaly` | Solo anomalías (lo que corre cada 15 min) | Sí |
+| `python run_pipeline.py --signals anomaly` | Solo anomalías (lo que corre cada hora) | Sí |
 | `python run_pipeline.py --signals garch` | Solo GARCH (lo que corre al cierre) | Sí |
 | `python run_pipeline.py --mode report` | Walk-forward histórico de ambas señales y reporte en `reports/report_<UTC>/` (`report.html` autocontenido, `report.pdf` ejecutivo A4 y `figures/*.png` a 200 dpi). Tarda ~40 s en CPU; `--mode backtest` es un alias | No |
 
@@ -198,17 +206,23 @@ estos resultados y corrigió cinco defectos de medición:
 
 ## Automatización
 
-- `.github/workflows/pipeline.yml`: corre `run_pipeline.py` cada 15 min en
+- `.github/workflows/pipeline.yml`: corre `run_pipeline.py` cada hora en
   horario de mercado (anomalías) y a las 00:30 UTC de mar a sáb (GARCH,
   cuando ya cerraron las velas diarias de índices y FX), y versiona
-  `data/pipeline.db`. GitHub envía un correo si el job falla.
+  `data/pipeline.db`. GitHub envía un correo si el job falla. El bot
+  empuja con una llave de despliegue que solo existe durante el paso de
+  push (`.github/scripts/bot_push.sh`); `main` exige el check `quality`
+  a todo lo demás.
 - `.github/workflows/report.yml`: cada lunes a las 01:00 UTC (y a mano con
-  `workflow_dispatch`) genera el reporte y lo publica como artefacto de la
-  corrida.
+  `workflow_dispatch`) genera el reporte, lo publica como artefacto de la
+  corrida y lo despliega en GitHub Pages.
 - `.github/workflows/weekly-ml-report.yml`: cada viernes a las 21:00 de
   Ciudad de México resume cuánto mejoró el modelo frente a su baseline
   (`python -m src.reporting.weekly_ml`), commitea
-  `reports/weekly/AAAA-MM-DD.md` y abre un Issue con el resumen.
+  `reports/weekly/AAAA-MM-DD.md` y abre un Issue con el resumen. Incluye
+  cuántas veces corrió el pipeline en la semana y avisa si faltó algún
+  día. También archiva en `data/archive/` el detalle de predicciones
+  cerradas de más de 180 días (`python -m src.persistence.archive`).
 - `.github/workflows/ci.yml`: en cada push, Ruff (PEP8 a 79 columnas, type
   hints, docstrings, sin `except` genérico) y pytest.
 
@@ -236,19 +250,23 @@ ORDER BY created_at DESC;
 - En FX la ventana alto-bajo de Yahoo no cubre las 24 h (~25% de las velas
   se ensanchan al re-alinear el cierre) y el último día FX disponible va un
   día detrás de los índices.
-- El test de lift del detector trata las velas como independientes; las
-  etiquetas se solapan y las anomalías se agrupan, así que su p-valor es
-  optimista.
+- El test de lift del detector cuenta solo anomalías separadas por el
+  horizonte de la etiqueta (sus etiquetas no comparten futuro) y reparte
+  alfa entre los 7 activos (Bonferroni). Con esa vara, en los últimos 60
+  días solo USD/CAD muestra señal de reversión; en los índices el
+  detector no supera al azar.
 
 - Yahoo Finance (vía `yfinance`) es una fuente no oficial y gratuita: puede
   limitar peticiones o cambiar su formato. El sistema falla de forma
   explícita en ese caso, pero no lo evita.
 - Las velas de 5 minutos solo están disponibles para los últimos 60 días,
   así que la validación del detector usa esa ventana.
-- GitHub Actions no garantiza los cron frecuentes: entre el 2026-09-24 y
-  el 2026-10-17 corrió 54 de ~630 ciclos programados. El backfill de
-  velas cerradas evita perder muestra si hay al menos una corrida cada 5
-  días (`predict_period`); un scheduler externo daría puntualidad real.
+- GitHub Actions no garantiza los cron frecuentes: con el cron de 15 min
+  corrieron 109 ciclos en 48 días (1 a 3 al día, con horas de retraso),
+  por eso ahora es cada hora. El backfill de velas cerradas evita perder
+  muestra si hay al menos una corrida cada 5 días (`predict_period`); un
+  scheduler externo daría puntualidad real. No es un sistema en tiempo
+  real: es un registro auditable con evaluación diferida.
 - El horario del cron sigue el mercado de EE. UU.; en forex (24/5) las
   velas fuera de ese horario se registran por backfill en la corrida
   siguiente.
@@ -280,10 +298,11 @@ run_pipeline.py              punto de entrada único
 src/                         código de producción (config, data, features,
                              models, persistence, evaluation, pipeline,
                              reporting, notifications)
-tests/                       156 pruebas pytest (contratos OHLC, fuga,
+tests/                       191 pruebas pytest (contratos OHLC, fuga,
                              estimadores, modelos, selección, VaR,
                              reporte, integración, entry point)
 data/pipeline.db             historial auditable (lo crea el pipeline)
+data/archive/                detalle de predicciones de más de 180 días
 notebooks/                   EDA original (referencia)
 reports/                     reportes generados (solo se versionan los
                              citados aquí)

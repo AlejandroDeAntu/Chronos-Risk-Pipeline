@@ -1,8 +1,9 @@
 name: Reporte semanal
 
 # Genera el reporte de volatilidad y riesgo (HTML autocontenido, PDF y PNG)
-# con datos frescos y lo publica como artifact descargable del run. No se
-# commitea: los reportes son derivados y reproducibles con el mismo comando.
+# con datos frescos, lo publica como artifact descargable del run y como
+# página pública (GitHub Pages). No se commitea: los reportes son derivados
+# y reproducibles con el mismo comando.
 
 on:
   schedule:
@@ -17,6 +18,13 @@ jobs:
   report:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -41,3 +49,21 @@ jobs:
           path: reports/report_*/
           retention-days: 90
           if-no-files-found: error
+
+      # Página pública: el último reporte queda en la raíz del sitio.
+      - name: Preparar el sitio
+        if: ${{ !cancelled() }}
+        run: |
+          latest="$(ls -d reports/report_*/ | tail -n 1)"
+          mkdir _site
+          cp -r "$latest". _site/
+          cp _site/report.html _site/index.html
+
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+      - id: deploy
+        if: ${{ !cancelled() }}
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
