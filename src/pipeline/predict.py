@@ -200,6 +200,75 @@ def _backfill_anomaly_predictions(
     )
 
 
+def _store_prediction(
+    asset: AssetConfig,
+    settings: PipelineSettings,
+    signal_type: SignalType,
+    payload: AnomalyPredictionPayload | VolatilityForecastPayload,
+    reference: datetime,
+    horizon_bars: int,
+    run_ts: datetime,
+    detail: str,
+    cold_start: bool,
+) -> AssetStageResult:
+    """Guarda una predicción (idempotente) y arma el resultado de etapa."""
+    prediction_id = database.insert_prediction(
+        db_path=settings.paths.database_path,
+        asset_symbol=asset.symbol,
+        signal_type=signal_type.value,
+        model_version=payload.model_version,
+        reference_timestamp=reference,
+        horizon_bars=horizon_bars,
+        payload=payload.model_dump(mode="json"),
+        run_ts=run_ts,
+    )
+    if prediction_id is None:
+        detail += " (ya registrada, no se duplica)"
+    logger.info("[predict:%s] %s: %s", signal_type.value, asset.symbol, detail)
+    return AssetStageResult(
+        asset_symbol=asset.symbol,
+        signal_type=signal_type,
+        stage=Stage.PREDICT,
+        succeeded=True,
+        detail=detail,
+        prediction_id=prediction_id,
+        cold_start=cold_start,
+    )
+
+
+def _cold_start_detector(
+    asset: AssetConfig, settings: PipelineSettings, run_ts: datetime
+) -> AnomalyDetector:
+    """Calibra, registra y promueve el primer detector de un activo."""
+    cfg = settings.anomaly
+    logger.warning(
+        "'%s' sin detector activo: calibrando el primero con %s de "
+        "historia (arranque en frío).",
+        asset.symbol,
+        cfg.history_period,
+    )
+    history = load_intraday_returns(
+        asset, settings, cfg.history_period, run_ts
+    )
+    detector = AnomalyDetector.fit(
+        log_return=history,
+        rolling_window=cfg.rolling_window,
+        target_anomaly_rate=cfg.target_anomaly_rate,
+        reversion_horizon_bars=cfg.reversion_horizon_bars,
+        min_bars_required=cfg.min_bars_required,
+        seasonal=cfg.seasonal_adjustment,
+    )
+    registry.register_candidate(
+        settings.paths.database_path,
+        asset.symbol,
+        SignalType.ANOMALY,
+        detector,
+        _COLD_START_METRICS,
+        promote=True,
+    )
+    return detector
+
+
 def predict_anomaly_for_asset(
     asset: AssetConfig, settings: PipelineSettings, run_ts: datetime
 ) -> AssetStageResult:
@@ -229,31 +298,7 @@ def predict_anomaly_for_asset(
     detector = registry.load_active_anomaly_model(db_path, asset.symbol)
     cold_start = detector is None
     if detector is None:
-        logger.warning(
-            "'%s' sin detector activo: calibrando el primero con %s de "
-            "historia (arranque en frío).",
-            asset.symbol,
-            cfg.history_period,
-        )
-        history = load_intraday_returns(
-            asset, settings, cfg.history_period, run_ts
-        )
-        detector = AnomalyDetector.fit(
-            log_return=history,
-            rolling_window=cfg.rolling_window,
-            target_anomaly_rate=cfg.target_anomaly_rate,
-            reversion_horizon_bars=cfg.reversion_horizon_bars,
-            min_bars_required=cfg.min_bars_required,
-            seasonal=cfg.seasonal_adjustment,
-        )
-        registry.register_candidate(
-            db_path,
-            asset.symbol,
-            SignalType.ANOMALY,
-            detector,
-            _COLD_START_METRICS,
-            promote=True,
-        )
+        detector = _cold_start_detector(asset, settings, run_ts)
 
     log_return = load_intraday_returns(
         asset, settings, cfg.predict_period, run_ts
@@ -286,32 +331,21 @@ def predict_anomaly_for_asset(
             f"Predicción de anomalía inválida para '{asset.symbol}': {exc}"
         ) from exc
 
-    prediction_id = database.insert_prediction(
-        db_path=db_path,
-        asset_symbol=asset.symbol,
-        signal_type=SignalType.ANOMALY.value,
-        model_version=detector.version,
-        reference_timestamp=payload.observed_at,
-        horizon_bars=detector.reversion_horizon_bars,
-        payload=payload.model_dump(mode="json"),
-        run_ts=run_ts,
-    )
     detail = (
         f"vela {payload.observed_at:%Y-%m-%d %H:%M} UTC, "
         f"z={payload.zscore:.2f}, anomalía={payload.is_anomaly}, "
         f"{n_backfilled} velas previas recuperadas"
     )
-    if prediction_id is None:
-        detail += " (ya registrada, no se duplica)"
-    logger.info("[predict:anomaly] %s: %s", asset.symbol, detail)
-    return AssetStageResult(
-        asset_symbol=asset.symbol,
-        signal_type=SignalType.ANOMALY,
-        stage=Stage.PREDICT,
-        succeeded=True,
-        detail=detail,
-        prediction_id=prediction_id,
-        cold_start=cold_start,
+    return _store_prediction(
+        asset,
+        settings,
+        SignalType.ANOMALY,
+        payload,
+        payload.observed_at,
+        detector.reversion_horizon_bars,
+        run_ts,
+        detail,
+        cold_start,
     )
 
 
@@ -400,32 +434,21 @@ def predict_garch_for_asset(
             f"Pronóstico de volatilidad inválido para '{asset.symbol}': {exc}"
         ) from exc
 
-    prediction_id = database.insert_prediction(
-        db_path=db_path,
-        asset_symbol=asset.symbol,
-        signal_type=SignalType.GARCH_VOLATILITY_FORECAST.value,
-        model_version=model.version,
-        reference_timestamp=forecast_origin,
-        horizon_bars=1,
-        payload=payload.model_dump(mode="json"),
-        run_ts=run_ts,
-    )
     detail = (
         f"{model.family} origen {forecast_origin:%Y-%m-%d}, "
         f"vol 1d={payload.predicted_volatility_pct:.3f}%, "
         f"VaR95={payload.var_95:.4f}, VaR99={payload.var_99:.4f}"
     )
-    if prediction_id is None:
-        detail += " (ya registrado, no se duplica)"
-    logger.info("[predict:garch] %s: %s", asset.symbol, detail)
-    return AssetStageResult(
-        asset_symbol=asset.symbol,
-        signal_type=SignalType.GARCH_VOLATILITY_FORECAST,
-        stage=Stage.PREDICT,
-        succeeded=True,
-        detail=detail,
-        prediction_id=prediction_id,
-        cold_start=cold_start,
+    return _store_prediction(
+        asset,
+        settings,
+        SignalType.GARCH_VOLATILITY_FORECAST,
+        payload,
+        forecast_origin,
+        1,
+        run_ts,
+        detail,
+        cold_start,
     )
 
 
