@@ -8,6 +8,6 @@ yfinance>=0.2.40
 requests>=2.31
 pydantic>=2.6
 pandera>=0.20
-tenacity>=8.2
+tenacity>=9.2.1
 river>=0.21
 matplotlib>=3.8
