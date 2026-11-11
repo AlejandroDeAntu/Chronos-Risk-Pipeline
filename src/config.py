@@ -236,6 +236,15 @@ class DataQualityConfig(BaseModel):
             "(USD/JPY); 10% deja margen y detecta una fuente corrupta."
         ),
     )
+    max_intraday_age_hours: int = Field(
+        default=96,
+        ge=1,
+        description=(
+            "Antigüedad máxima de la última vela intradía. 96 h cubren un "
+            "fin de semana con lunes festivo (viernes 21:00 a martes "
+            "13:30 UTC son 88.5 h); más que eso es una fuente detenida."
+        ),
+    )
     max_zero_return_share: float = Field(
         default=0.20,
         gt=0.0,

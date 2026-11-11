@@ -9,6 +9,7 @@ import pandas as pd
 
 from src.config import (
     AssetConfig,
+    DataQualityConfig,
     PathsConfig,
     PipelineSettings,
     RetrainTriggerConfig,
@@ -56,4 +57,9 @@ def make_settings(
         database_path=tmp_path / "data" / "pipeline.db",
         reports_dir=tmp_path / "reports",
     )
-    return PipelineSettings(assets=(asset,), paths=paths, retrain=retrain)
+    # Los datos sintéticos tienen fecha fija y algunas pruebas usan el reloj
+    # real: sin esto, la guarda de antigüedad los rechazaría con el tiempo.
+    quality = DataQualityConfig(max_intraday_age_hours=24 * 365 * 100)
+    return PipelineSettings(
+        assets=(asset,), paths=paths, retrain=retrain, data_quality=quality
+    )

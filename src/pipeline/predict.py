@@ -73,6 +73,9 @@ def load_intraday_returns(
         period=period,
         min_rows=cfg.min_bars_required + cfg.rolling_window,
         now=now,
+        max_age=pd.Timedelta(
+            hours=settings.data_quality.max_intraday_age_hours
+        ),
     )
     frame = validate_intraday_closes(frame)
     warn_if_stale(
