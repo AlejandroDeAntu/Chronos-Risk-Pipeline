@@ -84,14 +84,19 @@ jobs:
         id: commit
         if: ${{ !cancelled() }}
         env:
+          PIPELINE_ALERT_WEBHOOK_URL: ${{ secrets.PIPELINE_ALERT_WEBHOOK_URL }}
           SIGNALS: ${{ steps.select.outputs.signals }}
         run: |
           git config user.name "trading-pipeline-bot"
           git config user.email "actions@users.noreply.github.com"
+          # Devuelve 1 solo si no hay nada que versionar; un fallo real de
+          # git commit termina el paso en rojo (dentro de `||`, bash -e no
+          # aplica, por eso el `|| exit 1` explícito).
           commit_db() {
             git add data/pipeline.db
-            git diff --cached --quiet && return 1
-            git commit -m "data: ciclo $SIGNALS $(date -u +%Y-%m-%dT%H:%MZ)"
+            if git diff --cached --quiet; then return 1; fi
+            git commit -m "data: ciclo $SIGNALS $(date -u +%Y-%m-%dT%H:%MZ)" \
+              || exit 1
           }
           commit_db || exit 0
           # Si alguien empujó a main durante la corrida hay que ponerse al
@@ -101,10 +106,13 @@ jobs:
           if ! git pull --rebase --autostash; then
             git rebase --abort
             git reset --hard origin/main
-            python run_pipeline.py --signals $SIGNALS || true
-            commit_db || exit 0
+            python run_pipeline.py --signals $SIGNALS || retry_failed=1
+            commit_db || exit "${retry_failed:-0}"
           fi
           echo "push=true" >> "$GITHUB_OUTPUT"
+          # Lo procesado se empuja igual, pero el job queda en rojo si la
+          # repetición del ciclo falló.
+          exit "${retry_failed:-0}"
 
       - name: Empujar con la llave del bot
         if: ${{ !cancelled() && steps.commit.outputs.push == 'true' }}

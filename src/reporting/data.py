@@ -267,7 +267,8 @@ def _anomaly_section(
     )
     labeled = result.labeled
     lift = independent_precision_lift_test(labeled, min_gap)
-    low, high = result.pooled.precision_ci_95
+    # El IC sale de las mismas anomalías independientes que el lift.
+    low, high = lift.precision_ci_95 or result.pooled.precision_ci_95
     return AnomalySection(
         lift=lift,
         lift_ci=(low / lift.prevalence, high / lift.prevalence),

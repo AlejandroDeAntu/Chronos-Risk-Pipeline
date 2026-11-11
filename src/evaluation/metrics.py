@@ -274,6 +274,8 @@ class PrecisionLiftResult:
     lift: float
     p_value: float
     n_predicted_positive: int
+    precision_ci_95: tuple[float, float] | None = None
+    """Wilson al 95% sobre las mismas anomalías que ``precision``."""
 
 
 def precision_lift_test(report: ClassificationReport) -> PrecisionLiftResult:
@@ -366,6 +368,7 @@ def independent_precision_lift_test(
         lift=tp / k / prevalence,
         p_value=float(result.pvalue),
         n_predicted_positive=k,
+        precision_ci_95=_wilson_interval(tp, k),
     )
 
 

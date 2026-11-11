@@ -167,6 +167,10 @@ def test_independent_lift_counts_a_cluster_of_anomalies_once() -> None:
     assert thinned.precision == pytest.approx(1.0)
     assert thinned.prevalence == naive.prevalence == pytest.approx(0.6)
     assert thinned.p_value > naive.p_value
+    # El IC usa las 40 independientes: más ancho que con las 200.
+    assert thinned.precision_ci_95 is not None
+    assert naive.precision_ci_95 is not None
+    assert thinned.precision_ci_95[0] < naive.precision_ci_95[0]
 
 
 def test_independent_lift_requires_predicted_positives() -> None:
