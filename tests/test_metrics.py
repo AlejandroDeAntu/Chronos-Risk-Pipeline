@@ -10,6 +10,7 @@ from src.evaluation.metrics import (
     diebold_mariano,
     evaluate_anomaly_classifier,
     evaluate_volatility_forecast,
+    independent_precision_lift_test,
     precision_lift_test,
     qlike_loss,
 )
@@ -139,3 +140,36 @@ def test_diebold_mariano_handles_constant_differential() -> None:
     assert same.t_stat == 0.0
     assert same.p_value_one_sided == pytest.approx(0.5)
     assert better.p_value_one_sided == pytest.approx(0.0)
+
+
+def _labeled(flags: list[bool], hits: list[bool]) -> pd.DataFrame:
+    index = pd.date_range(
+        "2026-09-18 14:00", periods=len(flags), freq="5min", tz="UTC"
+    )
+    return pd.DataFrame({"is_anomaly": flags, "reverted": hits}, index=index)
+
+
+def test_independent_lift_counts_a_cluster_of_anomalies_once() -> None:
+    # 40 rachas de 5 anomalías seguidas que "aciertan": con horizonte de 10
+    # barras sus etiquetas comparten casi todo el futuro; son 40 hechos
+    # independientes, no 200.
+    flags = ([True] * 5 + [False] * 15) * 40
+    hits = ([True] * 5 + [True, False] * 7 + [False]) * 40
+    labeled = _labeled(flags, hits)
+
+    naive = independent_precision_lift_test(labeled, pd.Timedelta(0))
+    thinned = independent_precision_lift_test(
+        labeled, pd.Timedelta(minutes=50)
+    )
+
+    assert naive.n_predicted_positive == 200
+    assert thinned.n_predicted_positive == 40
+    assert thinned.precision == pytest.approx(1.0)
+    assert thinned.prevalence == naive.prevalence == pytest.approx(0.6)
+    assert thinned.p_value > naive.p_value
+
+
+def test_independent_lift_requires_predicted_positives() -> None:
+    labeled = _labeled([False] * 20, [True, False] * 10)
+    with pytest.raises(ValueError, match="indefinido"):
+        independent_precision_lift_test(labeled, pd.Timedelta(minutes=50))

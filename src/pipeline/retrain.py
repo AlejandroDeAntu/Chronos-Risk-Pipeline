@@ -41,7 +41,7 @@ from src.evaluation.metrics import (
     ClassificationReport,
     diebold_mariano,
     evaluate_anomaly_classifier,
-    precision_lift_test,
+    independent_precision_lift_test,
 )
 from src.evaluation.volatility_selection import (
     select_champion,
@@ -213,17 +213,27 @@ def retrain_anomaly_model(
     """
     result = walk_forward_anomaly(log_return, settings)
     pooled = result.pooled
-    enough_positives = (
-        pooled.n_predicted_positive >= settings.retrain.min_predicted_positives
-    )
+    cfg = settings.anomaly
     # F1 contra UNA tirada aleatoria es casi una moneda al aire cuando el
-    # detector está cerca del azar: se exige significancia sobre el lift.
-    lift = precision_lift_test(pooled) if enough_positives else None
-    promote = (
+    # detector está cerca del azar: se exige significancia sobre el lift,
+    # contando solo anomalías cuyas etiquetas no comparten futuro.
+    try:
+        lift = independent_precision_lift_test(
+            result.labeled,
+            pd.Timedelta(minutes=cfg.bar_minutes * cfg.reversion_horizon_bars),
+        )
+    except ValueError:
+        lift = None
+    if (
         lift is not None
-        and lift.lift > 1.0
-        and lift.p_value < settings.retrain.promotion_alpha
-    )
+        and lift.n_predicted_positive
+        < settings.retrain.min_predicted_positives
+    ):
+        lift = None
+    # La misma prueba se repite en cada activo: Bonferroni mantiene en
+    # ``promotion_alpha`` la probabilidad de alguna promoción por azar.
+    alpha = settings.retrain.promotion_alpha / len(settings.assets)
+    promote = lift is not None and lift.lift > 1.0 and lift.p_value < alpha
 
     candidate = AnomalyDetector.fit(
         log_return=log_return,
@@ -237,6 +247,7 @@ def retrain_anomaly_model(
         "walk_forward_folds": result.n_folds,
         "pooled_report": asdict(pooled),
         "precision_lift": asdict(lift) if lift is not None else None,
+        "promotion_alpha": alpha,
         "promoted": promote,
         **_trigger_metrics(decision),
     }
@@ -251,9 +262,13 @@ def retrain_anomaly_model(
     lift_text = (
         f"lift precisión {lift.lift:.3f} (p={lift.p_value:.4f})"
         if lift is not None
-        else "positivos insuficientes"
+        else "anomalías independientes insuficientes"
     )
-    reason = f"{lift_text}; anomalías {pooled.n_predicted_positive}"
+    reason = (
+        f"{lift_text}; alfa {alpha:.4f}; anomalías "
+        f"{pooled.n_predicted_positive}"
+        f" ({lift.n_predicted_positive if lift else 0} independientes)"
+    )
     if promote:
         logger.info("Detector de '%s' promovido: %s.", asset.symbol, reason)
     else:
