@@ -28,9 +28,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Llave de despliegue: exenta de la regla que exige CI en main.
-          # Sin el secreto, checkout usa GITHUB_TOKEN como antes.
-          ssh-key: ${{ secrets.BOT_DEPLOY_KEY }}
+          # Sin credenciales en .git/config: la llave del bot solo aparece
+          # en el paso que empuja (.github/scripts/bot_push.sh).
+          persist-credentials: false
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -41,7 +41,14 @@ jobs:
 
       - name: Generar reporte
         id: report
-        run: echo "path=$(python -m src.reporting.weekly_ml)" >> "$GITHUB_OUTPUT"
+        run: |
+          # Solo la última línea de stdout es la ruta; se valida su forma
+          # antes de usarla como salida del paso.
+          path="$(python -m src.reporting.weekly_ml | tail -n 1)"
+          case "$path" in
+            reports/weekly/*.md) echo "path=$path" >> "$GITHUB_OUTPUT" ;;
+            *) echo "Ruta de reporte inesperada: $path" >&2; exit 1 ;;
+          esac
 
       - name: Versionar el reporte
         id: commit
@@ -54,8 +61,13 @@ jobs:
           git diff --cached --quiet && exit 0
           git commit -m "docs: reporte semanal del modelo $(basename "$REPORT" .md)"
           git pull --rebase --autostash
-          git push
           echo "committed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Empujar con la llave del bot
+        if: ${{ steps.commit.outputs.committed == 'true' }}
+        env:
+          BOT_DEPLOY_KEY: ${{ secrets.BOT_DEPLOY_KEY }}
+        run: .github/scripts/bot_push.sh
 
       # Solo si hubo reporte nuevo: relanzar el mismo día no duplica el Issue.
       - name: Abrir Issue con el resumen
