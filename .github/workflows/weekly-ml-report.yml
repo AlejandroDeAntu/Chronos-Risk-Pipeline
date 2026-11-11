@@ -50,6 +50,11 @@ jobs:
             *) echo "Ruta de reporte inesperada: $path" >&2; exit 1 ;;
           esac
 
+      # Mueve a data/archive/ el detalle de predicciones de más de 180 días
+      # para que la base no crezca sin límite (src/persistence/archive.py).
+      - name: Archivar predicciones viejas
+        run: python -m src.persistence.archive
+
       - name: Versionar el reporte
         id: commit
         env:
@@ -57,7 +62,7 @@ jobs:
         run: |
           git config user.name "trading-pipeline-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add "$REPORT"
+          git add "$REPORT" data
           git diff --cached --quiet && exit 0
           git commit -m "docs: reporte semanal del modelo $(basename "$REPORT" .md)"
           git pull --rebase --autostash
