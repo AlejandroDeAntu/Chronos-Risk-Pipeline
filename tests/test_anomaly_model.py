@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.config import PipelineSettings
+from src.config import AssetConfig, PipelineSettings
 from src.exceptions import InsufficientHistoryError, ModelFitError
 from src.models.anomaly_model import AnomalyDetector, label_reversion_outcomes
 
@@ -140,3 +140,39 @@ def test_walk_forward_skips_fold_when_detector_fit_fails(
     )
 
     assert result.n_folds == 3
+
+
+def test_promotion_alpha_is_split_across_assets(
+    test_settings: PipelineSettings,
+    test_asset: AssetConfig,
+    synthetic_intraday_close: pd.Series,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.evaluation.metrics import PrecisionLiftResult
+    from src.persistence import database
+    from src.pipeline import retrain
+
+    database.init_db(test_settings.paths.database_path)
+    log_return = np.log(synthetic_intraday_close).diff().dropna()
+    # Un lift con p = 0.02 pasa con un activo (alfa 0.05) pero no cuando la
+    # misma prueba se repite en 7 activos (alfa 0.05 / 7 = 0.0071).
+    monkeypatch.setattr(
+        retrain,
+        "independent_precision_lift_test",
+        lambda labeled, min_gap: PrecisionLiftResult(0.6, 0.5, 1.2, 0.02, 50),
+    )
+    others = tuple(
+        test_asset.model_copy(update={"symbol": f"^T{i}"}) for i in range(6)
+    )
+    seven = test_settings.model_copy(update={"assets": (test_asset, *others)})
+
+    alone = retrain.retrain_anomaly_model(
+        test_asset, test_settings, log_return
+    )
+    among_seven = retrain.retrain_anomaly_model(test_asset, seven, log_return)
+
+    assert alone.promoted is True
+    assert among_seven.promoted is False
+    assert among_seven.validation_metrics["promotion_alpha"] == pytest.approx(
+        0.05 / 7
+    )

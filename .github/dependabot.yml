@@ -6,3 +6,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # Rangos de requirements*.txt. Los .lock con hashes no los regenera
+  # Dependabot: tras aceptar un PR, correr el `uv pip compile` del README.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly

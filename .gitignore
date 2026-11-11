@@ -38,3 +38,4 @@ Thumbs.db
 
 # data/pipeline.db NO se ignora: GitHub Actions la versiona como historial
 # auditable de predicciones, resultados y modelos (ver README).
+.coverage

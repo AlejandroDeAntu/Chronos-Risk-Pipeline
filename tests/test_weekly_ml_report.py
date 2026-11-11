@@ -153,3 +153,26 @@ def test_write_report_creates_dated_file(
 )
 def test_default_cutoff_is_last_friday_9pm_cdmx(now: datetime) -> None:
     assert weekly_ml.last_cutoff(now) == WEEK_END
+
+
+def _prediction(db_path: Path, signal: str, run_ts: datetime) -> None:
+    database.insert_prediction(
+        db_path, "^GSPC", signal, "v1", run_ts, 1, {}, run_ts
+    )
+
+
+def test_markdown_reports_pipeline_runs_and_warns_about_missing_days(
+    db_path: Path,
+) -> None:
+    # Volatilidad corrió los 5 días; anomalías solo 2 de 5.
+    for days_ago in (1, 2, 3, 4, 5):
+        _prediction(db_path, GARCH, WEEK_END - timedelta(days=days_ago))
+    for days_ago in (1, 1.1, 4):
+        _prediction(db_path, "anomaly", WEEK_END - timedelta(days=days_ago))
+
+    text = weekly_ml.render_markdown(db_path, WEEK_END)
+
+    assert "| Volatilidad (QLIKE) | 5 | 5 de 5 |" in text
+    assert "| Anomalías (F1) | 3 | 2 de 5 |" in text
+    assert "**Aviso:** el pipeline no corrió todos los días" in text
+    assert "Anomalías (F1)" in text.split("**Aviso:**")[1].splitlines()[0]

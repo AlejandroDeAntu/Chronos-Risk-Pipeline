@@ -10,8 +10,12 @@ name: Pipeline
 
 on:
   schedule:
-    # Anomalías: cada 15 min, ~horario de mercado US (13-21 UTC), lun-vie.
-    - cron: "*/15 13-21 * * 1-5"
+    # Anomalías: cada hora, ~horario de mercado US (13-21 UTC), lun-vie.
+    # Antes era cada 15 min, pero GitHub solo disparaba 1 a 3 corridas al
+    # día (109 en 48 días): los cron densos se omiten bajo carga. El minuto
+    # 7 evita la hora en punto, la más saturada. Cada corrida recupera las
+    # velas de 5 min que no vio (hasta 5 días), así que no se pierde señal.
+    - cron: "7 13-21 * * 1-5"
     # GARCH: 00:30 UTC mar-sáb, cuando ya cerraron las velas diarias del día
     # anterior tanto de índices US como de FX (ver DAILY_BAR_FINAL_AFTER en
     # src/config.py). A las 22:00 UTC la vela FX del día aún no es final.
@@ -41,9 +45,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Llave de despliegue: exenta de la regla que exige CI en main.
-          # Sin el secreto, checkout usa GITHUB_TOKEN como antes.
-          ssh-key: ${{ secrets.BOT_DEPLOY_KEY }}
+          # Sin credenciales en .git/config: la llave del bot solo aparece
+          # en el paso que empuja (.github/scripts/bot_push.sh).
+          persist-credentials: false
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -77,16 +81,41 @@ jobs:
       # Se ejecuta aunque algún activo haya fallado: lo que sí se procesó
       # queda registrado, y el job igual aparece en rojo por el paso anterior.
       - name: Versionar la base de datos actualizada
+        id: commit
         if: ${{ !cancelled() }}
         env:
+          PIPELINE_ALERT_WEBHOOK_URL: ${{ secrets.PIPELINE_ALERT_WEBHOOK_URL }}
           SIGNALS: ${{ steps.select.outputs.signals }}
         run: |
           git config user.name "trading-pipeline-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add data/pipeline.db
-          git diff --cached --quiet && exit 0
-          git commit -m "data: ciclo $SIGNALS $(date -u +%Y-%m-%dT%H:%MZ)"
-          # Si alguien empujó a main durante la corrida, el push directo
-          # fallaría y el ciclo se perdería.
-          git pull --rebase --autostash
-          git push
+          # Devuelve 1 solo si no hay nada que versionar; un fallo real de
+          # git commit termina el paso en rojo (dentro de `||`, bash -e no
+          # aplica, por eso el `|| exit 1` explícito).
+          commit_db() {
+            git add data/pipeline.db
+            if git diff --cached --quiet; then return 1; fi
+            git commit -m "data: ciclo $SIGNALS $(date -u +%Y-%m-%dT%H:%MZ)" \
+              || exit 1
+          }
+          commit_db || exit 0
+          # Si alguien empujó a main durante la corrida hay que ponerse al
+          # día. Un cambio de código se rebasa solo; si también cambió la
+          # base (binaria, no se puede fusionar) se repite el ciclo sobre
+          # la de main en vez de perderlo.
+          if ! git pull --rebase --autostash; then
+            git rebase --abort
+            git reset --hard origin/main
+            python run_pipeline.py --signals $SIGNALS || retry_failed=1
+            commit_db || exit "${retry_failed:-0}"
+          fi
+          echo "push=true" >> "$GITHUB_OUTPUT"
+          # Lo procesado se empuja igual, pero el job queda en rojo si la
+          # repetición del ciclo falló.
+          exit "${retry_failed:-0}"
+
+      - name: Empujar con la llave del bot
+        if: ${{ !cancelled() && steps.commit.outputs.push == 'true' }}
+        env:
+          BOT_DEPLOY_KEY: ${{ secrets.BOT_DEPLOY_KEY }}
+        run: .github/scripts/bot_push.sh

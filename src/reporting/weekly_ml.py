@@ -275,6 +275,48 @@ def _beats_ewma(metrics: dict[str, object]) -> str:
     return "sí" if flag else "**no**"
 
 
+_EXPECTED_RUN_DAYS = 5
+"""Días por semana con corrida programada de cada señal (lun-vie, mar-sáb)."""
+
+
+def _run_health_lines(db_path: Path, week_end: datetime) -> list[str]:
+    """Cuántas veces corrió el pipeline y en cuántos días distintos.
+
+    GitHub retrasa y omite corridas programadas sin avisar; este es el
+    único lugar donde un día sin corrida queda a la vista.
+    """
+    with closing(_connect_ro(db_path)) as conn:
+        rows = conn.execute(
+            """
+            SELECT signal_type, COUNT(DISTINCT run_ts) AS runs,
+                   COUNT(DISTINCT substr(run_ts, 1, 10)) AS days
+            FROM predictions
+            WHERE run_ts >= ? AND run_ts < ?
+            GROUP BY signal_type
+            """,
+            ((week_end - _WEEK).isoformat(), week_end.isoformat()),
+        ).fetchall()
+    found = {row["signal_type"]: row for row in rows}
+    lines = [
+        "| Señal | Corridas | Días con corrida |",
+        "|---|---|---|",
+    ]
+    missing = []
+    for signal, label in _SIGNAL_LABELS.items():
+        runs = found[signal]["runs"] if signal in found else 0
+        days = found[signal]["days"] if signal in found else 0
+        lines.append(f"| {label} | {runs} | {days} de {_EXPECTED_RUN_DAYS} |")
+        if days < _EXPECTED_RUN_DAYS:
+            missing.append(label)
+    if missing:
+        lines += [
+            "",
+            "**Aviso:** el pipeline no corrió todos los días en "
+            f"{', '.join(missing)}. Revisa la pestaña Actions.",
+        ]
+    return lines
+
+
 def _ewma_warning(registrations: list[sqlite3.Row]) -> list[str]:
     laggards = sorted(
         {
@@ -343,6 +385,10 @@ def render_markdown(db_path: Path, week_end: datetime) -> str:
         "## Reentrenamientos de la semana",
         "",
         *_registration_lines(registrations),
+        "",
+        "## Corridas del pipeline",
+        "",
+        *_run_health_lines(db_path, week_end),
         "",
     ]
     return "\n".join(lines)

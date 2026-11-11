@@ -122,3 +122,27 @@ def test_fetch_daily_closes_keeps_bar_after_session_close(
     )
 
     assert result.index[-1] == pd.Timestamp("2026-09-18")
+
+
+def test_fetch_intraday_bars_rejects_stale_last_bar(
+    synthetic_intraday_close: pd.Series, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = as_yfinance_frame(synthetic_intraday_close, "^TEST")
+    monkeypatch.setattr(fetch, "_download_raw", lambda symbol, **kw: raw)
+    last_close = synthetic_intraday_close.index[-1] + pd.Timedelta(minutes=5)
+    max_age = pd.Timedelta(hours=96)
+
+    # Dentro del margen (fin de semana largo): se acepta.
+    fetch.fetch_intraday_bars(
+        "^TEST", 5, "5d", 10, now=last_close + max_age, max_age=max_age
+    )
+    # Yahoo devolvió velas de hace más de 4 días: no se predice sobre eso.
+    with pytest.raises(DataUnavailableError, match="tiene .* de antigüedad"):
+        fetch.fetch_intraday_bars(
+            "^TEST",
+            5,
+            "5d",
+            10,
+            now=last_close + max_age + pd.Timedelta(minutes=5),
+            max_age=max_age,
+        )

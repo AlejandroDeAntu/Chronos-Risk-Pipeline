@@ -27,7 +27,7 @@ from src.evaluation.metrics import (
     RegressionReport,
     diebold_mariano,
     evaluate_volatility_forecast,
-    precision_lift_test,
+    independent_precision_lift_test,
 )
 from src.evaluation.var_backtest import VarBacktestResult, var_backtest
 from src.evaluation.volatility_selection import (
@@ -256,12 +256,19 @@ def _volatility_section(
     )
 
 
-def _anomaly_section(item: AssetBacktest, n_tests: int) -> AnomalySection:
+def _anomaly_section(
+    item: AssetBacktest, settings: PipelineSettings, n_tests: int
+) -> AnomalySection:
     """Lift de precisión con IC, Bonferroni y AUC del detector."""
     result = item.anomaly
-    lift = precision_lift_test(result.pooled)
-    low, high = result.pooled.precision_ci_95
+    cfg = settings.anomaly
+    min_gap = pd.Timedelta(
+        minutes=cfg.bar_minutes * cfg.reversion_horizon_bars
+    )
     labeled = result.labeled
+    lift = independent_precision_lift_test(labeled, min_gap)
+    # El IC sale de las mismas anomalías independientes que el lift.
+    low, high = lift.precision_ci_95 or result.pooled.precision_ci_95
     return AnomalySection(
         lift=lift,
         lift_ci=(low / lift.prevalence, high / lift.prevalence),
@@ -290,7 +297,7 @@ def _asset_section(
             errors.append(f"reporte de volatilidad: {exc}")
     if item.anomaly is not None:
         try:
-            anomaly = _anomaly_section(item, n_tests)
+            anomaly = _anomaly_section(item, settings, n_tests)
         except (ValueError, ArithmeticError, RuntimeError) as exc:
             errors.append(f"reporte de anomalías: {exc}")
     return AssetSection(

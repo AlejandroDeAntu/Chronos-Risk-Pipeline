@@ -232,6 +232,7 @@ def fetch_intraday_bars(
     period: str,
     min_rows: int,
     now: datetime | None = None,
+    max_age: pd.Timedelta | None = None,
 ) -> pd.DataFrame:
     """Descarga velas intradía cerradas y las devuelve validadas.
 
@@ -248,6 +249,9 @@ def fetch_intraday_bars(
     now:
         Instante de referencia UTC para decidir qué velas ya cerraron; si es
         ``None`` se usa la hora actual. Se inyecta para poder probarlo.
+    max_age:
+        Antigüedad máxima del cierre de la última vela; ``None`` no la
+        revisa.
 
     Returns
     -------
@@ -258,7 +262,8 @@ def fetch_intraday_bars(
     Raises
     ------
     DataUnavailableError
-        Si la descarga falla o no hay suficientes velas cerradas.
+        Si la descarga falla, no hay suficientes velas cerradas o la última
+        es más vieja que ``max_age`` (la fuente dejó de actualizarse).
     """
     try:
         raw = _download_raw(symbol, interval=f"{bar_minutes}m", period=period)
@@ -287,5 +292,13 @@ def fetch_intraday_bars(
         raise DataUnavailableError(
             f"'{symbol}' tiene {len(close)} velas cerradas, "
             f"se requieren {min_rows}."
+        )
+    age = pd.Timestamp(reference) - (
+        close.index[-1] + pd.Timedelta(minutes=bar_minutes)
+    )
+    if max_age is not None and age > max_age:
+        raise DataUnavailableError(
+            f"La última vela de '{symbol}' tiene {age} de antigüedad "
+            f"(máximo {max_age}): la fuente no se está actualizando."
         )
     return close.to_frame()

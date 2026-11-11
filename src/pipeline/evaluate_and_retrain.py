@@ -73,11 +73,21 @@ def _close_anomaly_outcomes(
     except InsufficientHistoryError:
         return 0
 
+    # Última barra cuyo horizonte ya transcurrió, y primera de la ventana.
+    horizon = settings.anomaly.reversion_horizon_bars
+    last_complete = log_return.index[-horizon - 1]
     closed = 0
     for row in pending:
         reference = pd.Timestamp(row["reference_timestamp"])
         if reference not in labeled.index:
-            continue  # Horizonte aún incompleto o fuera de la ventana.
+            # Sin etiqueta posible: empate (retorno 0, signo indefinido) o
+            # barra que Yahoo ya no sirve. Sale de la cola sin resultado;
+            # antes quedaba pendiente para siempre.
+            if reference <= last_complete:
+                database.supersede_prediction(
+                    settings.paths.database_path, row["id"]
+                )
+            continue  # Si no, su horizonte aún no transcurre.
         reverted = bool(labeled.loc[reference, "reverted"])
         is_anomaly = bool(json.loads(row["payload_json"])["is_anomaly"])
         baseline_flag = bool(

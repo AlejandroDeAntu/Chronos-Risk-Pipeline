@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import pandas as pd
 import statsmodels.api as sm
 from scipy import stats
 from sklearn.metrics import (
@@ -273,6 +274,8 @@ class PrecisionLiftResult:
     lift: float
     p_value: float
     n_predicted_positive: int
+    precision_ci_95: tuple[float, float] | None = None
+    """Wilson al 95% sobre las mismas anomalías que ``precision``."""
 
 
 def precision_lift_test(report: ClassificationReport) -> PrecisionLiftResult:
@@ -308,6 +311,64 @@ def precision_lift_test(report: ClassificationReport) -> PrecisionLiftResult:
         lift=precision / prevalence,
         p_value=float(result.pvalue),
         n_predicted_positive=k,
+    )
+
+
+def independent_precision_lift_test(
+    labeled: pd.DataFrame, min_gap: pd.Timedelta
+) -> PrecisionLiftResult:
+    """Lift de precisión contando solo anomalías con etiquetas disjuntas.
+
+    Las anomalías llegan en rachas (la volatilidad se agrupa) y la etiqueta
+    de cada una mira las siguientes ``h`` barras: dos anomalías a menos de
+    ``h`` barras comparten futuro y no son ensayos independientes, que es
+    lo que supone el test binomial. Se conserva la primera de cada racha y
+    las que estén al menos a ``min_gap`` de la última conservada.
+
+    Parameters
+    ----------
+    labeled:
+        Barras etiquetadas en orden cronológico, con índice temporal y
+        columnas booleanas ``is_anomaly`` y ``reverted``.
+    min_gap:
+        Separación mínima entre anomalías contadas: el horizonte de la
+        etiqueta. ``Timedelta(0)`` reproduce el test sin adelgazar.
+
+    Returns
+    -------
+    PrecisionLiftResult
+        Precisión sobre las anomalías independientes; la prevalencia se
+        mide en todas las barras.
+
+    Raises
+    ------
+    ValueError
+        Si no hay anomalías o la prevalencia es 0 o 1.
+    """
+    flagged = labeled.loc[labeled["is_anomaly"].to_numpy(dtype=bool)]
+    kept: list[bool] = []
+    last: pd.Timestamp | None = None
+    # Bucle sobre las anomalías (cientos), no sobre todas las barras: la
+    # regla depende de la última conservada y no se puede vectorizar.
+    for timestamp, hit in zip(flagged.index, flagged["reverted"], strict=True):
+        if last is None or timestamp - last >= min_gap:
+            kept.append(bool(hit))
+            last = timestamp
+    k = len(kept)
+    prevalence = float(labeled["reverted"].mean())
+    if k == 0 or not 0.0 < prevalence < 1.0:
+        raise ValueError(
+            f"Test indefinido: k={k}, prevalencia={prevalence:.3f}."
+        )
+    tp = sum(kept)
+    result = stats.binomtest(tp, k, prevalence, alternative="greater")
+    return PrecisionLiftResult(
+        precision=tp / k,
+        prevalence=prevalence,
+        lift=tp / k / prevalence,
+        p_value=float(result.pvalue),
+        n_predicted_positive=k,
+        precision_ci_95=_wilson_interval(tp, k),
     )
 
 
