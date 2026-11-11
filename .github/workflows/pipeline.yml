@@ -10,8 +10,12 @@ name: Pipeline
 
 on:
   schedule:
-    # Anomalías: cada 15 min, ~horario de mercado US (13-21 UTC), lun-vie.
-    - cron: "*/15 13-21 * * 1-5"
+    # Anomalías: cada hora, ~horario de mercado US (13-21 UTC), lun-vie.
+    # Antes era cada 15 min, pero GitHub solo disparaba 1 a 3 corridas al
+    # día (109 en 48 días): los cron densos se omiten bajo carga. El minuto
+    # 7 evita la hora en punto, la más saturada. Cada corrida recupera las
+    # velas de 5 min que no vio (hasta 5 días), así que no se pierde señal.
+    - cron: "7 13-21 * * 1-5"
     # GARCH: 00:30 UTC mar-sáb, cuando ya cerraron las velas diarias del día
     # anterior tanto de índices US como de FX (ver DAILY_BAR_FINAL_AFTER en
     # src/config.py). A las 22:00 UTC la vela FX del día aún no es final.
